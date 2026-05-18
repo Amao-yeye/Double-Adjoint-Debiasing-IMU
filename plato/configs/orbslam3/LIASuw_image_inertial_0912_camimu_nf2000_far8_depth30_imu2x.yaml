@@ -1,0 +1,98 @@
+%YAML:1.0
+
+# PLATO stereo-inertial configuration for LIASuw 0912 APS stereo images.
+# Image parameters follow LIASuw_image_nf2000_far8_depth30.yaml.
+# IMU noise and random-walk values are scaled by 1/sqrt(2) relative to
+# LIASuw_image_inertial_0912_camimu_nf2000_far8_depth30.yaml, which gives
+# the IMU residuals approximately 2x weight in inverse-variance terms.
+# IMU/camera calibration is taken from:
+# /home/amao/datasets/LIASuw/LIASuw_Training/0912event/Calibration files/cam-imu.yaml
+
+File.version: "1.0"
+
+Camera.type: "PinHole"
+
+Camera1.fx: 358.9196
+Camera1.fy: 359.4445
+Camera1.cx: 163.2265
+Camera1.cy: 125.8207
+Camera1.k1: -0.4323
+Camera1.k2: 0.3167
+Camera1.p1: 0.0
+Camera1.p2: 0.0
+
+Camera2.fx: 357.7712
+Camera2.fy: 358.2077
+Camera2.cx: 185.7727
+Camera2.cy: 131.3493
+Camera2.k1: -0.4283
+Camera2.k2: 0.3064
+Camera2.p1: 0.0
+Camera2.p2: 0.0
+
+Camera.width: 346
+Camera.height: 260
+Camera.fps: 20
+Camera.RGB: 1
+
+Stereo.ThDepth: 30.0
+System.thFarPoints: 8.0
+Stereo.T_c1_c2: !!opencv-matrix
+  rows: 4
+  cols: 4
+  dt: f
+  data: [0.999981464, -0.001234211, -0.005962963, 0.198451806,
+         0.001237291, 0.999999102, 0.000511589, -0.000244104,
+         0.005962338, -0.000518961, 0.999982083, 0.000267006,
+         0.0, 0.0, 0.0, 1.0]
+
+# Transformation from left camera frame to body frame. ORB-SLAM3's body
+# frame is the IMU frame for stereo-inertial mode.
+IMU.T_b_c1: !!opencv-matrix
+  rows: 4
+  cols: 4
+  dt: f
+  data: [0.99995632, -0.00582488, 0.00730944, 0.00056935,
+         0.00586833, 0.99996516, -0.00593645, -0.00225558,
+         -0.0072746, 0.00597909, 0.99995566, 0.06824399,
+         0.0, 0.0, 0.0, 1.0]
+
+IMU.NoiseGyro: 0.00257109953134
+IMU.NoiseAcc: 0.0308350647079
+IMU.GyroWalk: 3.21697668669e-05
+IMU.AccWalk: 0.000488806240726
+IMU.Frequency: 1000.0
+IMU.InsertKFsWhenLost: 1
+IMU.fastInit: 1
+
+# cam-imu.yaml records gravity_vector: [-0.00457959, -0.05264750, -9.80640761].
+# This ORB-SLAM3 checkout uses the hard-coded IMU::GRAVITY_VALUE in source,
+# so the following audit-only fields are not consumed by the upstream parser.
+IMU.GravityMagnitude: 9.80654998
+IMU.GravityVector: !!opencv-matrix
+  rows: 3
+  cols: 1
+  dt: f
+  data: [-0.00457959, -0.05264750, -9.80640761]
+
+# cam-imu.yaml timeshift_cam_imu means t_imu = t_cam + shift. The runner uses
+# an IMU csv shifted back to the camera clock by this amount.
+IMU.TimeShiftCamToImu: 0.0026598593435407055
+
+ORBextractor.nFeatures: 2000
+ORBextractor.scaleFactor: 1.2
+ORBextractor.nLevels: 8
+ORBextractor.iniThFAST: 8
+ORBextractor.minThFAST: 3
+
+Viewer.KeyFrameSize: 0.05
+Viewer.KeyFrameLineWidth: 1.0
+Viewer.GraphLineWidth: 0.9
+Viewer.PointSize: 2.0
+Viewer.CameraSize: 0.05
+Viewer.CameraLineWidth: 2.0
+Viewer.ViewpointX: 0.0
+Viewer.ViewpointY: -0.7
+Viewer.ViewpointZ: -1.8
+Viewer.ViewpointF: 500.0
+Viewer.imageViewScale: 1.5

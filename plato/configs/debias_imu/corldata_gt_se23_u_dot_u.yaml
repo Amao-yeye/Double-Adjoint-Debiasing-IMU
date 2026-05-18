@@ -1,0 +1,40 @@
+dataset: corldata
+supervision: gt
+loss_type: se23_gt_supervision
+input_mode: u_dot_u
+
+data_root: results/debias_imu/corldata_gt_body_1000hz
+cache_dir: results/debias_imu/cache/corldata_gt_se23_u_dot_u_w64_1000hz
+outputdir: results/debias_imu/corldata_gt_se23_u_dot_u_w64_1000hz
+
+train_seqs: [S00, S02, S03, S07]
+test_seqs: [S13, S15, S20, S21, S22, S23]
+window_size: 64
+dt: 0.001
+batch_size: 256
+epoch: 100
+percent_for_val: 0.2
+train_batch_strategy: balanced_sequences
+
+network_type_Gyro: bw_func_net
+network_type_Acc: ba_func_net
+lr_Gyro: 0.005
+lr_Acc: 0.005
+weight_decay_Gyro: 0.000001
+weight_decay_Acc: 0.000001
+gyro_lr_step_size: 100
+acc_lr_step_size: 100
+gyro_lr_gamma: 0.5
+acc_lr_gamma: 0.5
+val_freq: 10
+save_freq: 10
+use_best_val: true
+readable_val_metrics: true
+
+sg_window_bw: 101
+sg_order_bw: 3
+sg_window_ba: 101
+sg_order_ba: 3
+
+device: cuda
+test_device: cpu

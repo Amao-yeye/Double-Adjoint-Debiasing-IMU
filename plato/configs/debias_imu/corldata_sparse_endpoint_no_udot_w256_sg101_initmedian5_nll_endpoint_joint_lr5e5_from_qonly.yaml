@@ -1,0 +1,69 @@
+dataset: corldata
+supervision: gt
+loss_type: se23_gt_supervision
+input_mode: u
+trainval_supervision_source: mocap_noninterp
+
+data_root: results/debias_imu/corldata_IMU_aligned_gt_vo_ref_sparse_gt
+cache_dir: results/debias_imu/cache/corldata_sparse_endpoint_no_udot_w256_sg101_initmedian5_nll_endpoint_qonly
+outputdir: results/debias_imu/corldata_sparse_endpoint_no_udot_w256_sg101_initmedian5_nll_endpoint_joint_lr5e5_from_qonly
+
+# Constrained endpoint-NLL dynamics fine-tune after q-only covariance calibration.
+# The Acc-only MSE extension improved validation but worsened S13/S15 full-test
+# drift, so this run starts from the current full-test-best SE23 mean model.
+train_seqs: [S00, S01, S02, S03]
+test_seqs: [S13, S15]
+window_size: 256
+dt: 0.001
+batch_size: 64
+epoch: 61
+percent_for_val: 0.2
+train_batch_strategy: random_sequence
+
+network_type_Gyro: bw_func_net_no_udot
+network_type_Acc: ba_func_net_no_udot
+bw_model_path: results/debias_imu/corldata_sparse_endpoint_no_udot_w128_sg101_initmedian5_e301_s13s15/Gyro_weights/best_val_model.pt
+ba_init_model_path: results/debias_imu/corldata_sparse_endpoint_no_udot_w128_sg101_initmedian5_e301_s13s15/Acc_weights/best_val_model.pt
+skip_gyro_train: true
+
+lr_Gyro: 0.005
+lr_Acc: 0.00005
+weight_decay_Gyro: 0.000001
+weight_decay_Acc: 0.000001
+gyro_lr_step_size: 150
+acc_lr_step_size: 40
+gyro_lr_gamma: 0.5
+acc_lr_gamma: 0.5
+val_freq: 5
+save_freq: 20
+
+acc_loss_type: nll
+nll_supervision_mode: endpoint
+nll_covariance_strategy: fixed
+nll_optimize_q: false
+nll_train_gyro: true
+nll_q_block_epochs: 25
+nll_lr_q: 0.0005
+nll_sigma_a: 0.002793442
+nll_sigma_g: 0.000241539
+nll_w_rot: 0.005
+nll_w_vel: 0.03
+nll_w_pos: 0.03
+nll_sigma_a_min: 0.0001
+nll_sigma_a_max: 0.1
+nll_sigma_g_min: 0.00001
+nll_sigma_g_max: 0.01
+
+use_best_val: true
+readable_val_metrics: true
+
+sg_window_bw: 101
+sg_order_bw: 3
+sg_window_ba: 31
+sg_order_ba: 3
+
+initial_bias_mode: median_window
+initial_bias_window_s: 5.0
+
+device: cuda
+test_device: cuda

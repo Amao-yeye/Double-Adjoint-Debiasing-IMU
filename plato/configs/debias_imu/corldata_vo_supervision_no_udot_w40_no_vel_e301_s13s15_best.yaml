@@ -1,0 +1,52 @@
+dataset: corldata
+supervision: gt
+loss_type: se23_gt_supervision
+input_mode: u
+trainval_supervision_source: vo_imu_noninterp
+vo_supervision_world_frame: vo
+vo_gap_tolerance_s: 0.015
+pseudo_gt_root: results/pseudo_gt/corldata
+gravity_accel_world: [0.0, 0.0, -9.7803]
+
+data_root: results/debias_imu/corldata_vo_refs_s00s01s02s03_test_s13s15_for_w128_no_udot
+cache_dir: results/debias_imu/cache/corldata_vo_supervision_no_udot_w40_e301_s13s15_best
+outputdir: results/debias_imu/corldata_vo_supervision_no_udot_w40_no_vel_e301_s13s15_best
+
+# Same as corldata_vo_supervision_no_udot_w40_e301_s13s15_best, except
+# Acc SE23 loss disables velocity supervision.
+train_seqs: [S00, S01, S02, S03]
+test_seqs: [S13, S15]
+window_size: 40
+dt: 0.001
+batch_size: 128
+epoch: 301
+percent_for_val: 0.2
+train_batch_strategy: random_sequence
+
+network_type_Gyro: bw_func_net_no_udot
+network_type_Acc: ba_func_net_no_udot
+lr_Gyro: 0.005
+lr_Acc: 0.005
+weight_decay_Gyro: 0.000001
+weight_decay_Acc: 0.000001
+gyro_lr_step_size: 150
+acc_lr_step_size: 150
+gyro_lr_gamma: 0.5
+acc_lr_gamma: 0.5
+val_freq: 25
+save_freq: 50
+
+acc_loss_rot_weight: 1.0
+acc_loss_vel_weight: 0.0
+acc_loss_pos_weight: 1.0
+
+use_best_val: true
+readable_val_metrics: true
+
+sg_window_bw: 31
+sg_order_bw: 3
+sg_window_ba: 31
+sg_order_ba: 3
+
+device: cuda
+test_device: cpu

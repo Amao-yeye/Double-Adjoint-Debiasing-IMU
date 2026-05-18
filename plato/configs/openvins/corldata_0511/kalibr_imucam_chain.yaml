@@ -1,0 +1,35 @@
+%YAML:1.0
+
+# corldata 0511 DAVIS stereo + left DAVIS IMU calibration.
+# Source: LIASuw_Training/esio.yaml and event0/1_esio.yaml.
+# The user confirmed corldata uses the same DAVIS extrinsics/calibration as LIASuw.
+
+cam0:
+  T_imu_cam:
+    - [0.99982062, -0.00531549, -0.01817911, 0.00126654]
+    - [0.00546713, 0.99995059, 0.00830192, -0.00295328]
+    - [0.01813409, -0.00839982, 0.99980028, 0.00206342]
+    - [0.0, 0.0, 0.0, 1.0]
+  cam_overlaps: [1]
+  camera_model: pinhole
+  distortion_coeffs: [-0.30624346790624646, 0.1425146717217006, -0.0013100988384794235, -0.0047694614401734324]
+  distortion_model: radtan
+  intrinsics: [312.0206439606905, 312.4734720152093, 159.57147431980286, 125.55510681344391]
+  resolution: [346, 260]
+  rostopic: /davis_left/image_raw
+  timeshift_cam_imu: 0.00777437
+
+cam1:
+  T_imu_cam:
+    - [0.99970707, -0.00501381, 0.02367771, 0.19905791]
+    - [0.00485213, 0.99996455, 0.00688113, -0.00339201]
+    - [-0.02371137, -0.00676423, 0.99969596, 0.0016675]
+    - [0.0, 0.0, 0.0, 1.0]
+  cam_overlaps: [0]
+  camera_model: pinhole
+  distortion_coeffs: [-0.30328331620524857, 0.1270139887276728, -0.0013512660200573788, 0.001013934053373898]
+  distortion_model: radtan
+  intrinsics: [310.8584570180142, 311.4594070713915, 190.26035791110112, 131.3065531064017]
+  resolution: [346, 260]
+  rostopic: /davis_right/image_raw
+  timeshift_cam_imu: 0.00777437

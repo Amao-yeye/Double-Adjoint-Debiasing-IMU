@@ -1,0 +1,45 @@
+dataset: corldata
+supervision: gt
+loss_type: se23_gt_supervision
+input_mode: u_dot_u
+
+data_root: results/debias_imu/corldata_IMU_aligned_gt_vo_ref_1000hz
+cache_dir: results/debias_imu/cache/corldata_imu_aligned_gt_baseline_expanded_train_w64_1000hz
+outputdir: results/debias_imu/corldata_imu_aligned_gt_baseline_expanded_train_w64_1000hz
+
+# Expanded non-degraded training set with per-sequence IMU-aligned GT.
+# S04 is excluded because prior diagnostics found a severe mocap/GT jump.
+# S05 and S07 are kept, but bad local windows are filtered through
+# mav0/quality/valid_window_starts_64.txt.
+train_seqs: [S00, S01, S02, S03, S05, S07]
+test_seqs: [S13, S15, S20, S21, S22, S23]
+window_size: 64
+dt: 0.001
+batch_size: 512
+epoch: 300
+percent_for_val: 0.2
+train_batch_strategy: balanced_sequences
+
+# Original Debias_IMU baseline network family: dot b = NN(b, u, u_dot).
+network_type_Gyro: bw_func_net
+network_type_Acc: ba_func_net
+lr_Gyro: 0.005
+lr_Acc: 0.005
+weight_decay_Gyro: 0.000001
+weight_decay_Acc: 0.000001
+gyro_lr_step_size: 100
+acc_lr_step_size: 100
+gyro_lr_gamma: 0.5
+acc_lr_gamma: 0.5
+val_freq: 10
+save_freq: 50
+use_best_val: true
+readable_val_metrics: true
+
+sg_window_bw: 101
+sg_order_bw: 3
+sg_window_ba: 101
+sg_order_ba: 3
+
+device: cuda
+test_device: cpu

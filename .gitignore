@@ -1,0 +1,76 @@
+# Build outputs
+build/
+**/build/
+cmake-build-*/
+out/
+bin/
+lib/
+
+# CMake artifacts
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+Makefile
+compile_commands.json
+CTestTestfile.cmake
+Testing/
+
+# ROS / catkin workspaces
+devel/
+install/
+logs/
+.catkin_tools/
+catkin_generated/
+
+# Data and experiment outputs
+datasets/
+results/
+experiments/*/outputs/
+*.bag
+*.db3
+*.mcap
+
+# External upstream repositories are kept as local nested git worktrees.
+external/
+!plato/patches/external/
+!plato/patches/external/**
+
+# Logs and temporary files
+*.log
+*.tmp
+*.temp
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+
+# Notebooks and profiling
+.ipynb_checkpoints/
+*.prof
+*.trace
+
+# LaTeX build artifacts
+*.aux
+*.bbl
+*.blg
+*.fdb_latexmk
+*.fls
+*.log
+*.out
+*.synctex.gz
+*.toc
+*.lof
+*.lot
+*.nav
+*.snm
+*.vrb

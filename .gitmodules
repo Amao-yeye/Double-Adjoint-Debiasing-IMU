@@ -1,0 +1,3 @@
+[submodule "paper/plato-overleaf"]
+	path = paper/plato-overleaf
+	url = https://git@git.overleaf.com/69a927ff71bb6f987df27546

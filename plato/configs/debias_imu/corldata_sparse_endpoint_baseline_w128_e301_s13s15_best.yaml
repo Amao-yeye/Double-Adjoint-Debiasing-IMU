@@ -1,0 +1,53 @@
+dataset: corldata
+supervision: gt
+loss_type: se23_gt_supervision
+input_mode: u_dot_u
+trainval_supervision_source: mocap_noninterp
+
+data_root: results/debias_imu/corldata_IMU_aligned_gt_vo_ref_sparse_gt
+cache_dir: results/debias_imu/cache/corldata_sparse_endpoint_baseline_w128_e301_s13s15_best
+outputdir: results/debias_imu/corldata_sparse_endpoint_baseline_w128_e301_s13s15_best
+
+# Longer sparse endpoint screening after the 64-endpoint run:
+# 128 original mocap GT endpoints span about 1.06 s. The IMU is integrated
+# between sparse GT timestamps, and SE23 loss is only evaluated at GT endpoints.
+train_seqs: [S00, S01, S02, S03]
+test_seqs: [S13, S15]
+window_size: 128
+dt: 0.001
+batch_size: 128
+epoch: 301
+percent_for_val: 0.2
+train_batch_strategy: random_sequence
+
+# Keep original Debias_IMU network for this screening so the main variable is
+# sparse endpoint supervision/window length, not a new model family.
+network_type_Gyro: bw_func_net
+network_type_Acc: ba_func_net
+lr_Gyro: 0.005
+lr_Acc: 0.005
+weight_decay_Gyro: 0.000001
+weight_decay_Acc: 0.000001
+gyro_lr_step_size: 150
+acc_lr_step_size: 150
+gyro_lr_gamma: 0.5
+acc_lr_gamma: 0.5
+val_freq: 25
+save_freq: 50
+
+acc_loss_rot_weight: 1.0
+acc_loss_vel_weight: 1.0
+acc_loss_pos_weight: 1.0
+
+# Sparse endpoint training showed visible validation oscillation in the 64-point
+# screening. Use best-val checkpoints for this method-development run.
+use_best_val: true
+readable_val_metrics: true
+
+sg_window_bw: 31
+sg_order_bw: 3
+sg_window_ba: 31
+sg_order_ba: 3
+
+device: cuda
+test_device: cpu

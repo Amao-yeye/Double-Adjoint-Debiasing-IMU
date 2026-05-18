@@ -1,0 +1,59 @@
+%YAML:1.0
+
+# PLATO copy of the LIASuw 0203/0205 DAVIS APS stereo baseline.
+# Intrinsics/extrinsics come from LIASuw_Training esio.yaml plus event0/1_esio.yaml.
+
+File.version: "1.0"
+
+Camera.type: "PinHole"
+
+Camera1.fx: 312.0206439606905
+Camera1.fy: 312.4734720152093
+Camera1.cx: 159.57147431980286
+Camera1.cy: 125.55510681344391
+Camera1.k1: -0.30624346790624646
+Camera1.k2: 0.1425146717217006
+Camera1.p1: -0.0013100988384794235
+Camera1.p2: -0.0047694614401734324
+
+Camera2.fx: 310.8584570180142
+Camera2.fy: 311.4594070713915
+Camera2.cx: 190.26035791110112
+Camera2.cy: 131.3065531064017
+Camera2.k1: -0.30328331620524857
+Camera2.k2: 0.1270139887276728
+Camera2.p1: -0.0013512660200573788
+Camera2.p2: 0.001013934053373898
+
+Camera.width: 346
+Camera.height: 260
+Camera.fps: 20
+Camera.RGB: 1
+
+Stereo.ThDepth: 40.0
+Stereo.T_c1_c2: !!opencv-matrix
+  rows: 4
+  cols: 4
+  dt: f
+  data: [0.999124279, 0.000331362, 0.041839652, 0.197746311,
+         -0.000262872, 0.999998617, -0.001642333, -0.001486741,
+         -0.041840144, 0.001629895, 0.999122986, -0.003995156,
+         0.0, 0.0, 0.0, 1.0]
+
+ORBextractor.nFeatures: 1000
+ORBextractor.scaleFactor: 1.2
+ORBextractor.nLevels: 8
+ORBextractor.iniThFAST: 12
+ORBextractor.minThFAST: 5
+
+Viewer.KeyFrameSize: 0.05
+Viewer.KeyFrameLineWidth: 1.0
+Viewer.GraphLineWidth: 0.9
+Viewer.PointSize: 2.0
+Viewer.CameraSize: 0.05
+Viewer.CameraLineWidth: 2.0
+Viewer.ViewpointX: 0.0
+Viewer.ViewpointY: -0.7
+Viewer.ViewpointZ: -1.8
+Viewer.ViewpointF: 500.0
+Viewer.imageViewScale: 1.5

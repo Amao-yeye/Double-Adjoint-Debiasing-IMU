@@ -1,0 +1,1185 @@
+diff --git a/ov_core/src/track/TrackBase.cpp b/ov_core/src/track/TrackBase.cpp
+index e214c23..c24a582 100644
+--- a/ov_core/src/track/TrackBase.cpp
++++ b/ov_core/src/track/TrackBase.cpp
+@@ -40,6 +40,15 @@ TrackBase::TrackBase(std::unordered_map<size_t, std::shared_ptr<CamBase>> camera
+   }
+ }
+ 
++void TrackBase::reset_tracking() {
++  std::lock_guard<std::mutex> lckv(mtx_last_vars);
++  database = std::make_shared<FeatureDatabase>();
++  img_last.clear();
++  img_mask_last.clear();
++  pts_last.clear();
++  ids_last.clear();
++}
++
+ void TrackBase::display_active(cv::Mat &img_out, int r1, int g1, int b1, int r2, int g2, int b2, std::string overlay) {
+ 
+   // Cache the images to prevent other threads from editing while we viz (which can be slow)
+@@ -245,4 +254,4 @@ void TrackBase::change_feat_id(size_t id_old, size_t id_new) {
+       }
+     }
+   }
+-}
+\ No newline at end of file
++}
+diff --git a/ov_core/src/track/TrackBase.h b/ov_core/src/track/TrackBase.h
+index e0afee1..6091baf 100644
+--- a/ov_core/src/track/TrackBase.h
++++ b/ov_core/src/track/TrackBase.h
+@@ -96,6 +96,14 @@ public:
+    */
+   virtual void feed_new_camera(const CameraData &message) = 0;
+ 
++  /**
++   * @brief Reset current image tracks and feature database.
++   *
++   * This is useful when the image stream has gone through a known invalid
++   * interval and old KLT tracks should not bridge into the next valid image.
++   */
++  virtual void reset_tracking();
++
+   /**
+    * @brief Shows features extracted in the last image
+    * @param img_out image to which we will overlayed features on
+diff --git a/ov_core/src/track/TrackKLT.cpp b/ov_core/src/track/TrackKLT.cpp
+index d2fe388..1ba0e5d 100644
+--- a/ov_core/src/track/TrackKLT.cpp
++++ b/ov_core/src/track/TrackKLT.cpp
+@@ -93,6 +93,13 @@ void TrackKLT::feed_new_camera(const CameraData &message) {
+   }
+ }
+ 
++void TrackKLT::reset_tracking() {
++  TrackBase::reset_tracking();
++  img_pyramid_last.clear();
++  img_curr.clear();
++  img_pyramid_curr.clear();
++}
++
+ void TrackKLT::feed_monocular(const CameraData &message, size_t msg_id) {
+ 
+   // Lock this data feed for this camera
+diff --git a/ov_core/src/track/TrackKLT.h b/ov_core/src/track/TrackKLT.h
+index f3ed6ea..0dc33ec 100644
+--- a/ov_core/src/track/TrackKLT.h
++++ b/ov_core/src/track/TrackKLT.h
+@@ -62,6 +62,11 @@ public:
+    */
+   void feed_new_camera(const CameraData &message) override;
+ 
++  /**
++   * @brief Reset current KLT tracks, pyramids, and feature database.
++   */
++  void reset_tracking() override;
++
+ protected:
+   /**
+    * @brief Process a new monocular image
+diff --git a/ov_msckf/src/core/VioManager.cpp b/ov_msckf/src/core/VioManager.cpp
+index 6a0d7b9..a743983 100644
+--- a/ov_msckf/src/core/VioManager.cpp
++++ b/ov_msckf/src/core/VioManager.cpp
+@@ -43,6 +43,8 @@
+ #include "update/UpdaterSLAM.h"
+ #include "update/UpdaterZeroVelocity.h"
+ 
++#include <cmath>
++
+ using namespace ov_core;
+ using namespace ov_type;
+ using namespace ov_msckf;
+@@ -277,6 +279,64 @@ void VioManager::track_image_and_update(const ov_core::CameraData &message_const
+     message.masks.at(i) = mask_temp;
+   }
+ 
++  // PLATO: detect dark-to-light re-entry before KLT uses stale dark-image tracks.
++  if (params.plato_reentry_enable) {
++    const double mean_intensity = plato_image_mean_intensity(message);
++    const bool dark_sample = mean_intensity < params.plato_reentry_brightness_threshold;
++    const bool light_sample = mean_intensity >= params.plato_reentry_light_threshold;
++
++    if (!plato_reentry_in_confirmed_dark) {
++      if (dark_sample) {
++        if (plato_reentry_dark_candidate_start < 0.0) {
++          plato_reentry_dark_candidate_start = message.timestamp;
++        }
++        if (message.timestamp - plato_reentry_dark_candidate_start >= params.plato_reentry_dark_confirm_s) {
++          plato_reentry_in_confirmed_dark = true;
++          plato_reentry_light_candidate_start = -1;
++          plato_reentry_confirmed_dark_mean = mean_intensity;
++          PRINT_INFO(YELLOW "[PLATO-REENTRY]: confirmed dark at %.6f, mean=%.3f\n" RESET, message.timestamp, mean_intensity);
++        }
++      } else {
++        plato_reentry_dark_candidate_start = -1;
++      }
++    } else {
++      if (light_sample) {
++        if (plato_reentry_light_candidate_start < 0.0) {
++          plato_reentry_light_candidate_start = message.timestamp;
++        }
++        const double dark_duration =
++            (plato_reentry_dark_candidate_start >= 0.0) ? message.timestamp - plato_reentry_dark_candidate_start : 0.0;
++        const bool use_fast_confirm = (dark_duration >= params.plato_reentry_long_dark_threshold_s) ||
++                                      (plato_reentry_confirmed_dark_mean >= params.plato_reentry_gray_dark_threshold);
++        const double light_confirm_s = use_fast_confirm
++                                           ? params.plato_reentry_long_dark_light_confirm_s
++                                           : params.plato_reentry_light_confirm_s;
++        if (message.timestamp - plato_reentry_light_candidate_start >= light_confirm_s) {
++          plato_reentry_pending = is_initialized_vio;
++          plato_reentry_pending_timestamp = message.timestamp;
++          if (is_initialized_vio && params.plato_reentry_clear_tracks) {
++            trackFEATS->reset_tracking();
++            if (trackARUCO != nullptr) {
++              trackARUCO->reset_tracking();
++            }
++          }
++          PRINT_INFO(YELLOW
++                     "[PLATO-REENTRY]: dark->light at %.6f, mean=%.3f, dark_mean=%.3f, dark_duration=%.3f, light_confirm=%.3f, "
++                     "clear_tracks=%d, inflate_covariance=%d\n" RESET,
++                     message.timestamp, mean_intensity, plato_reentry_confirmed_dark_mean, dark_duration, light_confirm_s,
++                     (int)(is_initialized_vio && params.plato_reentry_clear_tracks),
++                     (int)(is_initialized_vio && params.plato_reentry_inflate_covariance));
++          plato_reentry_in_confirmed_dark = false;
++          plato_reentry_dark_candidate_start = -1;
++          plato_reentry_light_candidate_start = -1;
++          plato_reentry_confirmed_dark_mean = 0;
++        }
++      } else {
++        plato_reentry_light_candidate_start = -1;
++      }
++    }
++  }
++
+   // Perform our feature tracking!
+   trackFEATS->feed_new_camera(message);
+ 
+@@ -342,6 +402,12 @@ void VioManager::do_feature_propagate_update(const ov_core::CameraData &message)
+   }
+   rT3 = boost::posix_time::microsec_clock::local_time();
+ 
++  if (params.plato_reentry_enable && plato_reentry_pending && std::abs(plato_reentry_pending_timestamp - message.timestamp) < 1e-6) {
++    plato_apply_reentry_stabilization(message.timestamp);
++    plato_reentry_pending = false;
++    plato_reentry_pending_timestamp = -1;
++  }
++
+   // If we have not reached max clones, we should just return...
+   // This isn't super ideal, but it keeps the logic after this easier...
+   // We can start processing things when we have at least 5 clones since we can start triangulating things...
+@@ -712,3 +778,53 @@ void VioManager::do_feature_propagate_update(const ov_core::CameraData &message)
+                state->_calib_imu_tg->value()(7), state->_calib_imu_tg->value()(8));
+   }
+ }
++
++double VioManager::plato_image_mean_intensity(const ov_core::CameraData &message) const {
++
++  if (message.images.empty()) {
++    return 255.0;
++  }
++
++  double mean_sum = 0.0;
++  int valid_images = 0;
++  for (const auto &image : message.images) {
++    if (image.empty()) {
++      continue;
++    }
++    mean_sum += cv::mean(image)[0];
++    valid_images++;
++  }
++  return valid_images > 0 ? mean_sum / valid_images : 255.0;
++}
++
++void VioManager::plato_apply_reentry_stabilization(double timestamp) {
++
++  if (!params.plato_reentry_inflate_covariance) {
++    return;
++  }
++
++  constexpr double kDegToRad = 3.14159265358979323846 / 180.0;
++  const double ori_var = std::pow(params.plato_reentry_ori_std_deg * kDegToRad, 2);
++  const double pos_var = std::pow(params.plato_reentry_pos_std_m, 2);
++  const double vel_var = std::pow(params.plato_reentry_vel_std_mps, 2);
++  const double bg_var = std::pow(params.plato_reentry_bg_std_rad_s, 2);
++  const double ba_var = std::pow(params.plato_reentry_ba_std_m_s2, 2);
++  const double clone_ori_var = std::pow(params.plato_reentry_clone_ori_std_deg * kDegToRad, 2);
++  const double clone_pos_var = std::pow(params.plato_reentry_clone_pos_std_m, 2);
++
++  StateHelper::add_diagonal_covariance(state, state->_imu->q(), ori_var);
++  StateHelper::add_diagonal_covariance(state, state->_imu->p(), pos_var);
++  StateHelper::add_diagonal_covariance(state, state->_imu->v(), vel_var);
++  StateHelper::add_diagonal_covariance(state, state->_imu->bg(), bg_var);
++  StateHelper::add_diagonal_covariance(state, state->_imu->ba(), ba_var);
++
++  for (const auto &clone : state->_clones_IMU) {
++    StateHelper::add_diagonal_covariance(state, clone.second->q(), clone_ori_var);
++    StateHelper::add_diagonal_covariance(state, clone.second->p(), clone_pos_var);
++  }
++
++  propagator->invalidate_cache();
++  PRINT_INFO(YELLOW "[PLATO-REENTRY]: inflated covariance at %.6f with std ori/pos/vel/bg/ba %.2fdeg %.2fm %.2fmps %.5fradps %.4fmps2\n" RESET,
++             timestamp, params.plato_reentry_ori_std_deg, params.plato_reentry_pos_std_m, params.plato_reentry_vel_std_mps,
++             params.plato_reentry_bg_std_rad_s, params.plato_reentry_ba_std_m_s2);
++}
+diff --git a/ov_msckf/src/core/VioManager.h b/ov_msckf/src/core/VioManager.h
+index 3fd7089..5729e6b 100644
+--- a/ov_msckf/src/core/VioManager.h
++++ b/ov_msckf/src/core/VioManager.h
+@@ -176,6 +176,16 @@ protected:
+    */
+   void retriangulate_active_tracks(const ov_core::CameraData &message);
+ 
++  /**
++   * @brief PLATO helper: average grayscale intensity of all images in a camera packet.
++   */
++  double plato_image_mean_intensity(const ov_core::CameraData &message) const;
++
++  /**
++   * @brief PLATO helper: clear stale visual state and inflate filter covariance at dark-to-light re-entry.
++   */
++  void plato_apply_reentry_stabilization(double timestamp);
++
+   /// Manager parameters
+   VioManagerOptions params;
+ 
+@@ -241,6 +251,14 @@ protected:
+   std::map<size_t, Eigen::Matrix3d> active_feat_linsys_A;
+   std::map<size_t, Eigen::Vector3d> active_feat_linsys_b;
+   std::map<size_t, int> active_feat_linsys_count;
++
++  /// PLATO dark-to-light re-entry state
++  bool plato_reentry_in_confirmed_dark = false;
++  bool plato_reentry_pending = false;
++  double plato_reentry_pending_timestamp = -1;
++  double plato_reentry_dark_candidate_start = -1;
++  double plato_reentry_light_candidate_start = -1;
++  double plato_reentry_confirmed_dark_mean = 0;
+ };
+ 
+ } // namespace ov_msckf
+diff --git a/ov_msckf/src/core/VioManagerOptions.h b/ov_msckf/src/core/VioManagerOptions.h
+index 0df7d15..0b1d15a 100644
+--- a/ov_msckf/src/core/VioManagerOptions.h
++++ b/ov_msckf/src/core/VioManagerOptions.h
+@@ -100,6 +100,57 @@ struct VioManagerOptions {
+   /// The path to the file we will record the timing information into
+   std::string record_timing_filepath = "ov_msckf_timing.txt";
+ 
++  /// PLATO: detect dark-to-light image re-entry and reset stale visual tracks
++  bool plato_reentry_enable = false;
++
++  /// PLATO: mean grayscale intensity below this value is treated as a dark image
++  double plato_reentry_brightness_threshold = 25.0;
++
++  /// PLATO: mean grayscale intensity above this value is treated as recovered light
++  double plato_reentry_light_threshold = 25.0;
++
++  /// PLATO: required continuous dark duration before a re-entry can be armed
++  double plato_reentry_dark_confirm_s = 0.5;
++
++  /// PLATO: required continuous light duration before a re-entry is triggered
++  double plato_reentry_light_confirm_s = 0.5;
++
++  /// PLATO: dark intervals at least this long use the long-dark light confirmation time
++  double plato_reentry_long_dark_threshold_s = 10.0;
++
++  /// PLATO: confirmed dark images above this mean intensity are treated as gray-dark and use fast light confirmation
++  double plato_reentry_gray_dark_threshold = 5.0;
++
++  /// PLATO: required continuous light duration after long dark intervals
++  double plato_reentry_long_dark_light_confirm_s = 0.2;
++
++  /// PLATO: clear KLT/ARUCO tracks and feature databases on dark-to-light transitions
++  bool plato_reentry_clear_tracks = true;
++
++  /// PLATO: inflate filter covariance after propagation on dark-to-light transitions
++  bool plato_reentry_inflate_covariance = true;
++
++  /// PLATO: current IMU orientation covariance inflation standard deviation in degrees
++  double plato_reentry_ori_std_deg = 5.0;
++
++  /// PLATO: current IMU position covariance inflation standard deviation in meters
++  double plato_reentry_pos_std_m = 10.0;
++
++  /// PLATO: current IMU velocity covariance inflation standard deviation in m/s
++  double plato_reentry_vel_std_mps = 2.0;
++
++  /// PLATO: current gyroscope bias covariance inflation standard deviation in rad/s
++  double plato_reentry_bg_std_rad_s = 0.02;
++
++  /// PLATO: current accelerometer bias covariance inflation standard deviation in m/s^2
++  double plato_reentry_ba_std_m_s2 = 0.10;
++
++  /// PLATO: clone orientation covariance inflation standard deviation in degrees
++  double plato_reentry_clone_ori_std_deg = 5.0;
++
++  /// PLATO: clone position covariance inflation standard deviation in meters
++  double plato_reentry_clone_pos_std_m = 10.0;
++
+   /**
+    * @brief This function will load print out all estimator settings loaded.
+    * This allows for visual checking that everything was loaded properly from ROS/CMD parsers.
+@@ -119,6 +170,23 @@ struct VioManagerOptions {
+       parser->parse_config("zupt_only_at_beginning", zupt_only_at_beginning);
+       parser->parse_config("record_timing_information", record_timing_information);
+       parser->parse_config("record_timing_filepath", record_timing_filepath);
++      parser->parse_config("plato_reentry_enable", plato_reentry_enable, false);
++      parser->parse_config("plato_reentry_brightness_threshold", plato_reentry_brightness_threshold, false);
++      parser->parse_config("plato_reentry_light_threshold", plato_reentry_light_threshold, false);
++      parser->parse_config("plato_reentry_dark_confirm_s", plato_reentry_dark_confirm_s, false);
++      parser->parse_config("plato_reentry_light_confirm_s", plato_reentry_light_confirm_s, false);
++      parser->parse_config("plato_reentry_long_dark_threshold_s", plato_reentry_long_dark_threshold_s, false);
++      parser->parse_config("plato_reentry_gray_dark_threshold", plato_reentry_gray_dark_threshold, false);
++      parser->parse_config("plato_reentry_long_dark_light_confirm_s", plato_reentry_long_dark_light_confirm_s, false);
++      parser->parse_config("plato_reentry_clear_tracks", plato_reentry_clear_tracks, false);
++      parser->parse_config("plato_reentry_inflate_covariance", plato_reentry_inflate_covariance, false);
++      parser->parse_config("plato_reentry_ori_std_deg", plato_reentry_ori_std_deg, false);
++      parser->parse_config("plato_reentry_pos_std_m", plato_reentry_pos_std_m, false);
++      parser->parse_config("plato_reentry_vel_std_mps", plato_reentry_vel_std_mps, false);
++      parser->parse_config("plato_reentry_bg_std_rad_s", plato_reentry_bg_std_rad_s, false);
++      parser->parse_config("plato_reentry_ba_std_m_s2", plato_reentry_ba_std_m_s2, false);
++      parser->parse_config("plato_reentry_clone_ori_std_deg", plato_reentry_clone_ori_std_deg, false);
++      parser->parse_config("plato_reentry_clone_pos_std_m", plato_reentry_clone_pos_std_m, false);
+     }
+     PRINT_DEBUG("  - dt_slam_delay: %.1f\n", dt_slam_delay);
+     PRINT_DEBUG("  - zero_velocity_update: %d\n", try_zupt);
+@@ -128,6 +196,19 @@ struct VioManagerOptions {
+     PRINT_DEBUG("  - zupt_only_at_beginning?: %d\n", zupt_only_at_beginning);
+     PRINT_DEBUG("  - record timing?: %d\n", (int)record_timing_information);
+     PRINT_DEBUG("  - record timing filepath: %s\n", record_timing_filepath.c_str());
++    PRINT_DEBUG("  - PLATO re-entry enable?: %d\n", (int)plato_reentry_enable);
++    PRINT_DEBUG("  - PLATO re-entry brightness threshold: %.2f\n", plato_reentry_brightness_threshold);
++    PRINT_DEBUG("  - PLATO re-entry light threshold: %.2f\n", plato_reentry_light_threshold);
++    PRINT_DEBUG("  - PLATO re-entry dark/light confirm: %.2f s, %.2f s\n", plato_reentry_dark_confirm_s, plato_reentry_light_confirm_s);
++    PRINT_DEBUG("  - PLATO re-entry long/gray-dark threshold/light confirm: %.2f s, %.2f mean, %.2f s\n",
++                plato_reentry_long_dark_threshold_s, plato_reentry_gray_dark_threshold, plato_reentry_long_dark_light_confirm_s);
++    PRINT_DEBUG("  - PLATO re-entry clear tracks?: %d\n", (int)plato_reentry_clear_tracks);
++    PRINT_DEBUG("  - PLATO re-entry inflate covariance?: %d\n", (int)plato_reentry_inflate_covariance);
++    PRINT_DEBUG("  - PLATO re-entry std ori/pos/vel/bg/ba: %.2f deg, %.2f m, %.2f m/s, %.5f rad/s, %.4f m/s^2\n",
++                plato_reentry_ori_std_deg, plato_reentry_pos_std_m, plato_reentry_vel_std_mps, plato_reentry_bg_std_rad_s,
++                plato_reentry_ba_std_m_s2);
++    PRINT_DEBUG("  - PLATO re-entry clone std ori/pos: %.2f deg, %.2f m\n", plato_reentry_clone_ori_std_deg,
++                plato_reentry_clone_pos_std_m);
+   }
+ 
+   // NOISE / CHI2 ============================
+@@ -571,4 +652,4 @@ struct VioManagerOptions {
+ 
+ } // namespace ov_msckf
+ 
+-#endif // OV_MSCKF_VIOMANAGEROPTIONS_H
+\ No newline at end of file
++#endif // OV_MSCKF_VIOMANAGEROPTIONS_H
+diff --git a/ov_msckf/src/state/Propagator.cpp b/ov_msckf/src/state/Propagator.cpp
+index 47879ec..39dd631 100644
+--- a/ov_msckf/src/state/Propagator.cpp
++++ b/ov_msckf/src/state/Propagator.cpp
+@@ -84,7 +84,8 @@ void Propagator::propagate_and_clone(std::shared_ptr<State> state, double timest
+ 
+       // Get the next state Jacobian and noise Jacobian for this IMU reading
+       Eigen::MatrixXd F, Qdi;
+-      predict_and_compute(state, prop_data.at(i), prop_data.at(i + 1), F, Qdi);
++      const ov_core::ImuData &data_prev = (i > 0) ? prop_data.at(i - 1) : prop_data.at(i);
++      predict_and_compute(state, data_prev, prop_data.at(i), prop_data.at(i + 1), F, Qdi);
+ 
+       // Next we should propagate our IMU covariance
+       // Pii' = F*Pii*F.transpose() + G*Q*G.transpose()
+@@ -163,6 +164,19 @@ bool Propagator::fast_state_propagate(std::shared_ptr<State> state, double times
+   // Biases
+   Eigen::Vector3d bias_g = cache_state_est.block(10, 0, 3, 1);
+   Eigen::Vector3d bias_a = cache_state_est.block(13, 0, 3, 1);
++  if (state->_options.freeze_imu_bias) {
++    bias_g = state->_options.frozen_imu_bias_g;
++    bias_a = state->_options.frozen_imu_bias_a;
++    cache_state_est.block(10, 0, 3, 1) = bias_g;
++    cache_state_est.block(13, 0, 3, 1) = bias_a;
++    const double cov = (state->_options.frozen_imu_bias_cov > 0.0) ? state->_options.frozen_imu_bias_cov : 0.0;
++    cache_state_covariance.block(9, 0, 3, 15).setZero();
++    cache_state_covariance.block(0, 9, 15, 3).setZero();
++    cache_state_covariance.block(12, 0, 3, 15).setZero();
++    cache_state_covariance.block(0, 12, 15, 3).setZero();
++    cache_state_covariance.block(9, 9, 3, 3) = cov * Eigen::Matrix3d::Identity();
++    cache_state_covariance.block(12, 12, 3, 3) = cov * Eigen::Matrix3d::Identity();
++  }
+ 
+   // IMU intrinsic calibration estimates (static)
+   Eigen::Matrix3d Dw = State::Dm(state->_options.imu_model, state->_calib_imu_dw->value());
+@@ -176,11 +190,23 @@ bool Propagator::fast_state_propagate(std::shared_ptr<State> state, double times
+   for (size_t i = 0; i < prop_data.size() - 1; i++) {
+ 
+     // Time elapsed over interval
++    auto data_prev = (i > 0) ? prop_data.at(i - 1) : prop_data.at(i);
+     auto data_minus = prop_data.at(i);
+     auto data_plus = prop_data.at(i + 1);
+     double dt = data_plus.timestamp - data_minus.timestamp;
+ 
+     // Corrected imu acc measurements with our current biases
++    Eigen::Vector3d am_avg = 0.5 * (data_minus.am + data_plus.am);
++    Eigen::Vector3d wm_avg = 0.5 * (data_minus.wm + data_plus.wm);
++    Eigen::Matrix<double, 6, 1> imu_delta = Eigen::Matrix<double, 6, 1>::Zero();
++    imu_delta.block(0, 0, 3, 1) = data_minus.wm - data_prev.wm;
++    imu_delta.block(3, 0, 3, 1) = data_minus.am - data_prev.am;
++    Eigen::Vector3d wm_bias_model = wm_avg;
++    Eigen::Vector3d am_bias_model = am_avg;
++    if (state->_options.learned_bias_dynamics_model == "phys_delta") {
++      wm_bias_model = data_minus.wm;
++      am_bias_model = data_minus.am;
++    }
+     Eigen::Vector3d a_hat1 = R_ACCtoIMU * Da * (data_minus.am - bias_a);
+     Eigen::Vector3d a_hat2 = R_ACCtoIMU * Da * (data_plus.am - bias_a);
+     Eigen::Vector3d a_hat = 0.5 * (a_hat1 + a_hat2);
+@@ -201,11 +227,20 @@ bool Propagator::fast_state_propagate(std::shared_ptr<State> state, double times
+     Eigen::Matrix<double, 15, 15> F = Eigen::Matrix<double, 15, 15>::Zero();
+     F.block(0, 0, 3, 3) = exp_so3(-w_hat * dt);
+     F.block(0, 9, 3, 3).noalias() = -exp_so3(-w_hat * dt) * Jr_so3(-w_hat * dt) * dt;
+-    F.block(9, 9, 3, 3).setIdentity();
++    if (state->_options.use_learned_bias_dynamics && !state->_options.freeze_imu_bias) {
++      Eigen::Matrix<double, 6, 6> bias_jac =
++          learned_bias_dynamics_jacobian(state, bias_g, bias_a, wm_bias_model, am_bias_model, imu_delta, R_Gtoi);
++      F.block(9, 9, 3, 3) = Eigen::Matrix3d::Identity() + dt * bias_jac.block(0, 0, 3, 3);
++      F.block(9, 12, 3, 3) = dt * bias_jac.block(0, 3, 3, 3);
++      F.block(12, 9, 3, 3) = dt * bias_jac.block(3, 0, 3, 3);
++      F.block(12, 12, 3, 3) = Eigen::Matrix3d::Identity() + dt * bias_jac.block(3, 3, 3, 3);
++    } else {
++      F.block(9, 9, 3, 3).setIdentity();
++      F.block(12, 12, 3, 3).setIdentity();
++    }
+     F.block(6, 0, 3, 3).noalias() = -R_Gtoi.transpose() * skew_x(a_hat * dt);
+     F.block(6, 6, 3, 3).setIdentity();
+     F.block(6, 12, 3, 3) = -R_Gtoi.transpose() * dt;
+-    F.block(12, 12, 3, 3).setIdentity();
+     F.block(3, 0, 3, 3).noalias() = -0.5 * R_Gtoi.transpose() * skew_x(a_hat * dt * dt);
+     F.block(3, 6, 3, 3) = Eigen::Matrix3d::Identity() * dt;
+     F.block(3, 12, 3, 3) = -0.5 * R_Gtoi.transpose() * dt * dt;
+@@ -224,8 +259,10 @@ bool Propagator::fast_state_propagate(std::shared_ptr<State> state, double times
+     Eigen::Matrix<double, 12, 12> Qc = Eigen::Matrix<double, 12, 12>::Zero();
+     Qc.block(0, 0, 3, 3) = _noises.sigma_w_2 / dt * Eigen::Matrix3d::Identity();
+     Qc.block(3, 3, 3, 3) = _noises.sigma_a_2 / dt * Eigen::Matrix3d::Identity();
+-    Qc.block(6, 6, 3, 3) = _noises.sigma_wb_2 * dt * Eigen::Matrix3d::Identity();
+-    Qc.block(9, 9, 3, 3) = _noises.sigma_ab_2 * dt * Eigen::Matrix3d::Identity();
++    if (!state->_options.freeze_imu_bias) {
++      Qc.block(6, 6, 3, 3) = _noises.sigma_wb_2 * dt * Eigen::Matrix3d::Identity();
++      Qc.block(9, 9, 3, 3) = _noises.sigma_ab_2 * dt * Eigen::Matrix3d::Identity();
++    }
+     Qd = G * Qc * G.transpose();
+     Qd = 0.5 * (Qd + Qd.transpose());
+     cache_state_covariance = F * cache_state_covariance * F.transpose() + Qd;
+@@ -234,6 +271,11 @@ bool Propagator::fast_state_propagate(std::shared_ptr<State> state, double times
+     cache_state_est.block(0, 0, 4, 1) = rot_2_quat(exp_so3(-w_hat * dt) * R_Gtoi);
+     cache_state_est.block(4, 0, 3, 1) = p_iinG + v_iinG * dt + 0.5 * R_Gtoi.transpose() * a_hat * dt * dt - 0.5 * _gravity * dt * dt;
+     cache_state_est.block(7, 0, 3, 1) = v_iinG + R_Gtoi.transpose() * a_hat * dt - _gravity * dt;
++    if (state->_options.use_learned_bias_dynamics && !state->_options.freeze_imu_bias) {
++      predict_learned_biases(state, dt, wm_bias_model, am_bias_model, imu_delta, R_Gtoi, bias_g, bias_a);
++      cache_state_est.block(10, 0, 3, 1) = bias_g;
++      cache_state_est.block(13, 0, 3, 1) = bias_a;
++    }
+   }
+ 
+   // Move the time forward
+@@ -266,6 +308,132 @@ bool Propagator::fast_state_propagate(std::shared_ptr<State> state, double times
+   return true;
+ }
+ 
++Eigen::VectorXd Propagator::learned_phys_delta_features(const StateOptions::LearnedBiasPhysDeltaModel &model, bool gyro_model,
++                                                        const Eigen::Vector3d &bg, const Eigen::Vector3d &ba, const Eigen::Vector3d &wm,
++                                                        const Eigen::Vector3d &am, const Eigen::Matrix<double, 6, 1> &imu_delta,
++                                                        const Eigen::Matrix3d &R_Gtoi) const {
++  Eigen::VectorXd features(model.feature_dim);
++  int idx = 0;
++  auto append_vec3 = [&](const Eigen::Vector3d &value) {
++    features.segment(idx, 3) = value;
++    idx += 3;
++  };
++  auto append_scalar = [&](double value) {
++    features(idx) = value;
++    idx += 1;
++  };
++
++  const Eigen::Vector3d bias = gyro_model ? bg : ba;
++  const Eigen::Vector3d ba_for_features = model.use_acc_bias ? ba : Eigen::Vector3d::Zero();
++  const Eigen::Vector3d omega_c = wm - bg;
++  const Eigen::Vector3d f_c = am - ba_for_features;
++  const Eigen::Vector3d g_body = R_Gtoi * Eigen::Vector3d(0.0, 0.0, -_gravity(2));
++  const Eigen::Vector3d a_dyn_body = f_c + g_body;
++
++  const Eigen::Vector3d bias_n = bias / model.bias_scale;
++  const Eigen::Vector3d omega_n = omega_c / 5.0;
++  const Eigen::Vector3d f_n = f_c / 9.81;
++  const Eigen::Vector3d a_dyn_n = a_dyn_body / 9.81;
++  const Eigen::Vector3d g_body_n = g_body / 9.81;
++  append_vec3(bias_n);
++  append_vec3(omega_n);
++  append_vec3(f_n);
++  append_vec3(a_dyn_n);
++  append_vec3(g_body_n);
++  append_scalar(omega_n.norm());
++  append_scalar(f_n.norm());
++  append_scalar(a_dyn_n.norm());
++  append_scalar(g_body_n.norm());
++  append_vec3(omega_n.cwiseProduct(omega_n));
++  append_vec3(f_n.cwiseProduct(f_n));
++  append_vec3(omega_n.cross(f_n));
++  append_vec3(omega_n.cross(g_body_n));
++
++  const Eigen::Vector3d delta_omega_n = imu_delta.block(0, 0, 3, 1) / 0.1;
++  const Eigen::Vector3d delta_f_n = imu_delta.block(3, 0, 3, 1);
++  append_vec3(delta_omega_n);
++  append_vec3(delta_f_n);
++  append_scalar(delta_omega_n.norm());
++  append_scalar(delta_f_n.norm());
++  append_vec3(delta_omega_n.cwiseProduct(delta_omega_n));
++  append_vec3(delta_f_n.cwiseProduct(delta_f_n));
++  append_vec3(delta_omega_n.cross(delta_f_n));
++  append_vec3(omega_n.cross(delta_f_n));
++  append_vec3(delta_omega_n.cross(f_n));
++
++  assert(idx == model.feature_dim);
++  return features;
++}
++
++Eigen::Vector3d Propagator::learned_gyro_bias_dynamics(std::shared_ptr<State> state, const Eigen::Vector3d &bg, const Eigen::Vector3d &ba,
++                                                       const Eigen::Vector3d &wm, const Eigen::Vector3d &am,
++                                                       const Eigen::Matrix<double, 6, 1> &imu_delta,
++                                                       const Eigen::Matrix3d &R_Gtoi) const {
++  const StateOptions &options = state->_options;
++  if (options.learned_bias_dynamics_model == "phys_delta") {
++    return options.learned_bg_phys_delta.evaluate(
++        learned_phys_delta_features(options.learned_bg_phys_delta, true, bg, ba, wm, am, imu_delta, R_Gtoi));
++  }
++  return options.learned_bg_c + options.learned_bg_Wb * bg + options.learned_bg_Ww * wm + options.learned_bg_Wa * am;
++}
++
++Eigen::Vector3d Propagator::learned_accel_bias_dynamics(std::shared_ptr<State> state, const Eigen::Vector3d &bg, const Eigen::Vector3d &ba,
++                                                        const Eigen::Vector3d &wm, const Eigen::Vector3d &am,
++                                                        const Eigen::Matrix<double, 6, 1> &imu_delta,
++                                                        const Eigen::Matrix3d &R_Gtoi) const {
++  const StateOptions &options = state->_options;
++  if (options.learned_bias_dynamics_model == "phys_delta") {
++    return options.learned_ba_phys_delta.evaluate(
++        learned_phys_delta_features(options.learned_ba_phys_delta, false, bg, ba, wm, am, imu_delta, R_Gtoi));
++  }
++  return options.learned_ba_c + options.learned_ba_Wb * ba + options.learned_ba_Ww * wm + options.learned_ba_Wa * am;
++}
++
++void Propagator::predict_learned_biases(std::shared_ptr<State> state, double dt, const Eigen::Vector3d &wm, const Eigen::Vector3d &am,
++                                        const Eigen::Matrix<double, 6, 1> &imu_delta, const Eigen::Matrix3d &R_Gtoi,
++                                        Eigen::Vector3d &new_bg, Eigen::Vector3d &new_ba) const {
++  const Eigen::Vector3d bg = new_bg;
++  const Eigen::Vector3d ba = new_ba;
++  new_bg = bg + learned_gyro_bias_dynamics(state, bg, ba, wm, am, imu_delta, R_Gtoi) * dt;
++  new_ba = ba + learned_accel_bias_dynamics(state, bg, ba, wm, am, imu_delta, R_Gtoi) * dt;
++}
++
++Eigen::Matrix<double, 6, 6> Propagator::learned_bias_dynamics_jacobian(std::shared_ptr<State> state, const Eigen::Vector3d &bg,
++                                                                        const Eigen::Vector3d &ba, const Eigen::Vector3d &wm,
++                                                                        const Eigen::Vector3d &am,
++                                                                        const Eigen::Matrix<double, 6, 1> &imu_delta,
++                                                                        const Eigen::Matrix3d &R_Gtoi) const {
++  Eigen::Matrix<double, 6, 6> jac = Eigen::Matrix<double, 6, 6>::Zero();
++  if (state->_options.learned_bias_dynamics_model == "affine") {
++    jac.block(0, 0, 3, 3) = state->_options.learned_bg_Wb;
++    jac.block(3, 3, 3, 3) = state->_options.learned_ba_Wb;
++    return jac;
++  }
++
++  const double eps = 1e-6;
++  auto eval = [&](const Eigen::Vector3d &bg_eval, const Eigen::Vector3d &ba_eval) {
++    Eigen::Matrix<double, 6, 1> out;
++    out.block(0, 0, 3, 1) = learned_gyro_bias_dynamics(state, bg_eval, ba_eval, wm, am, imu_delta, R_Gtoi);
++    out.block(3, 0, 3, 1) = learned_accel_bias_dynamics(state, bg_eval, ba_eval, wm, am, imu_delta, R_Gtoi);
++    return out;
++  };
++  for (int i = 0; i < 6; i++) {
++    Eigen::Vector3d bg_plus = bg;
++    Eigen::Vector3d bg_minus = bg;
++    Eigen::Vector3d ba_plus = ba;
++    Eigen::Vector3d ba_minus = ba;
++    if (i < 3) {
++      bg_plus(i) += eps;
++      bg_minus(i) -= eps;
++    } else {
++      ba_plus(i - 3) += eps;
++      ba_minus(i - 3) -= eps;
++    }
++    jac.col(i) = (eval(bg_plus, ba_plus) - eval(bg_minus, ba_minus)) / (2.0 * eps);
++  }
++  return jac;
++}
++
+ std::vector<ov_core::ImuData> Propagator::select_imu_readings(const std::vector<ov_core::ImuData> &imu_data, double time0, double time1,
+                                                               bool warn) {
+ 
+@@ -392,8 +560,8 @@ std::vector<ov_core::ImuData> Propagator::select_imu_readings(const std::vector<
+   return prop_data;
+ }
+ 
+-void Propagator::predict_and_compute(std::shared_ptr<State> state, const ov_core::ImuData &data_minus, const ov_core::ImuData &data_plus,
+-                                     Eigen::MatrixXd &F, Eigen::MatrixXd &Qd) {
++void Propagator::predict_and_compute(std::shared_ptr<State> state, const ov_core::ImuData &data_prev, const ov_core::ImuData &data_minus,
++                                     const ov_core::ImuData &data_plus, Eigen::MatrixXd &F, Eigen::MatrixXd &Qd) {
+ 
+   // Time elapsed over interval
+   double dt = data_plus.timestamp - data_minus.timestamp;
+@@ -405,6 +573,17 @@ void Propagator::predict_and_compute(std::shared_ptr<State> state, const ov_core
+   Eigen::Matrix3d Tg = State::Tg(state->_calib_imu_tg->value());
+ 
+   // Corrected imu acc measurements with our current biases
++  Eigen::Vector3d am_avg = 0.5 * (data_minus.am + data_plus.am);
++  Eigen::Vector3d wm_avg = 0.5 * (data_minus.wm + data_plus.wm);
++  Eigen::Matrix<double, 6, 1> imu_delta = Eigen::Matrix<double, 6, 1>::Zero();
++  imu_delta.block(0, 0, 3, 1) = data_minus.wm - data_prev.wm;
++  imu_delta.block(3, 0, 3, 1) = data_minus.am - data_prev.am;
++  Eigen::Vector3d wm_bias_model = wm_avg;
++  Eigen::Vector3d am_bias_model = am_avg;
++  if (state->_options.learned_bias_dynamics_model == "phys_delta") {
++    wm_bias_model = data_minus.wm;
++    am_bias_model = data_minus.am;
++  }
+   Eigen::Vector3d a_hat1 = data_minus.am - state->_imu->bias_a();
+   Eigen::Vector3d a_hat2 = data_plus.am - state->_imu->bias_a();
+   Eigen::Vector3d a_hat_avg = .5 * (a_hat1 + a_hat2);
+@@ -455,6 +634,15 @@ void Propagator::predict_and_compute(std::shared_ptr<State> state, const ov_core
+   } else {
+     compute_F_and_G_discrete(state, dt, w_hat_avg, a_hat_avg, w_uncorrected, a_uncorrected, new_q, new_v, new_p, F, G);
+   }
++  if (state->_options.use_learned_bias_dynamics && !state->_options.freeze_imu_bias) {
++    Eigen::Matrix<double, 6, 6> bias_jac =
++        learned_bias_dynamics_jacobian(state, state->_imu->bias_g(), state->_imu->bias_a(), wm_bias_model, am_bias_model, imu_delta,
++                                       state->_imu->Rot());
++    F.block(9, 9, 3, 3) = Eigen::Matrix3d::Identity() + dt * bias_jac.block(0, 0, 3, 3);
++    F.block(9, 12, 3, 3) = dt * bias_jac.block(0, 3, 3, 3);
++    F.block(12, 9, 3, 3) = dt * bias_jac.block(3, 0, 3, 3);
++    F.block(12, 12, 3, 3) = Eigen::Matrix3d::Identity() + dt * bias_jac.block(3, 3, 3, 3);
++  }
+ 
+   // Construct our discrete noise covariance matrix
+   // Note that we need to convert our continuous time noises to discrete
+@@ -462,8 +650,10 @@ void Propagator::predict_and_compute(std::shared_ptr<State> state, const ov_core
+   Eigen::Matrix<double, 12, 12> Qc = Eigen::Matrix<double, 12, 12>::Zero();
+   Qc.block(0, 0, 3, 3) = std::pow(_noises.sigma_w, 2) / dt * Eigen::Matrix3d::Identity();
+   Qc.block(3, 3, 3, 3) = std::pow(_noises.sigma_a, 2) / dt * Eigen::Matrix3d::Identity();
+-  Qc.block(6, 6, 3, 3) = std::pow(_noises.sigma_wb, 2) / dt * Eigen::Matrix3d::Identity();
+-  Qc.block(9, 9, 3, 3) = std::pow(_noises.sigma_ab, 2) / dt * Eigen::Matrix3d::Identity();
++  if (!state->_options.freeze_imu_bias) {
++    Qc.block(6, 6, 3, 3) = std::pow(_noises.sigma_wb, 2) / dt * Eigen::Matrix3d::Identity();
++    Qc.block(9, 9, 3, 3) = std::pow(_noises.sigma_ab, 2) / dt * Eigen::Matrix3d::Identity();
++  }
+ 
+   // Compute the noise injected into the state over the interval
+   Qd = Eigen::MatrixXd::Zero(state->imu_intrinsic_size() + 15, state->imu_intrinsic_size() + 15);
+@@ -475,6 +665,16 @@ void Propagator::predict_and_compute(std::shared_ptr<State> state, const ov_core
+   imu_x.block(0, 0, 4, 1) = new_q;
+   imu_x.block(4, 0, 3, 1) = new_p;
+   imu_x.block(7, 0, 3, 1) = new_v;
++  if (state->_options.freeze_imu_bias) {
++    imu_x.block(10, 0, 3, 1) = state->_options.frozen_imu_bias_g;
++    imu_x.block(13, 0, 3, 1) = state->_options.frozen_imu_bias_a;
++  } else if (state->_options.use_learned_bias_dynamics) {
++    Eigen::Vector3d new_bg = state->_imu->bias_g();
++    Eigen::Vector3d new_ba = state->_imu->bias_a();
++    predict_learned_biases(state, dt, wm_bias_model, am_bias_model, imu_delta, state->_imu->Rot(), new_bg, new_ba);
++    imu_x.block(10, 0, 3, 1) = new_bg;
++    imu_x.block(13, 0, 3, 1) = new_ba;
++  }
+   state->_imu->set_value(imu_x);
+   state->_imu->set_fej(imu_x);
+ }
+@@ -765,13 +965,21 @@ void Propagator::compute_F_and_G_analytic(std::shared_ptr<State> state, double d
+   F.block(th_id, bg_id, 3, 3) = -dR_ktok1 * Jr_ktok1 * dt * R_wtoI * Dw;
+   F.block(p_id, bg_id, 3, 3) = R_k.transpose() * Xi_4 * R_wtoI * Dw;
+   F.block(v_id, bg_id, 3, 3) = R_k.transpose() * Xi_3 * R_wtoI * Dw;
+-  F.block(bg_id, bg_id, 3, 3).setIdentity();
++  if (state->_options.use_learned_bias_dynamics && !state->_options.freeze_imu_bias) {
++    F.block(bg_id, bg_id, 3, 3) = Eigen::Matrix3d::Identity() + dt * state->_options.learned_bg_Wb;
++  } else {
++    F.block(bg_id, bg_id, 3, 3).setIdentity();
++  }
+ 
+   // for ba
+   F.block(th_id, ba_id, 3, 3) = dR_ktok1 * Jr_ktok1 * dt * R_wtoI * Dw * Tg * R_atoI * Da;
+   F.block(p_id, ba_id, 3, 3) = -R_k.transpose() * (Xi_2 + Xi_4 * R_wtoI * Dw * Tg) * R_atoI * Da;
+   F.block(v_id, ba_id, 3, 3) = -R_k.transpose() * (Xi_1 + Xi_3 * R_wtoI * Dw * Tg) * R_atoI * Da;
+-  F.block(ba_id, ba_id, 3, 3).setIdentity();
++  if (state->_options.use_learned_bias_dynamics && !state->_options.freeze_imu_bias) {
++    F.block(ba_id, ba_id, 3, 3) = Eigen::Matrix3d::Identity() + dt * state->_options.learned_ba_Wb;
++  } else {
++    F.block(ba_id, ba_id, 3, 3).setIdentity();
++  }
+ 
+   // begin to add the state transition matrix for the omega intrinsics Dw part
+   if (Dw_id != -1) {
+@@ -910,10 +1118,18 @@ void Propagator::compute_F_and_G_discrete(std::shared_ptr<State> state, double d
+   F.block(v_id, ba_id, 3, 3) = -R_k.transpose() * dt * R_atoI * Da;
+ 
+   // for bg
+-  F.block(bg_id, bg_id, 3, 3).setIdentity();
++  if (state->_options.use_learned_bias_dynamics && !state->_options.freeze_imu_bias) {
++    F.block(bg_id, bg_id, 3, 3) = Eigen::Matrix3d::Identity() + dt * state->_options.learned_bg_Wb;
++  } else {
++    F.block(bg_id, bg_id, 3, 3).setIdentity();
++  }
+ 
+   // for ba
+-  F.block(ba_id, ba_id, 3, 3).setIdentity();
++  if (state->_options.use_learned_bias_dynamics && !state->_options.freeze_imu_bias) {
++    F.block(ba_id, ba_id, 3, 3) = Eigen::Matrix3d::Identity() + dt * state->_options.learned_ba_Wb;
++  } else {
++    F.block(ba_id, ba_id, 3, 3).setIdentity();
++  }
+ 
+   // begin to add the state transition matrix for the omega intrinsics Dw part
+   if (Dw_id != -1) {
+@@ -1013,4 +1229,4 @@ Eigen::MatrixXd Propagator::compute_H_Tg(std::shared_ptr<State> state, const Eig
+   Eigen::MatrixXd H_Tg = Eigen::MatrixXd::Zero(3, 9);
+   H_Tg << a_1 * I_3x3, a_2 * I_3x3, a_3 * I_3x3;
+   return H_Tg;
+-}
+\ No newline at end of file
++}
+diff --git a/ov_msckf/src/state/Propagator.h b/ov_msckf/src/state/Propagator.h
+index 26b4af3..440d1e9 100644
+--- a/ov_msckf/src/state/Propagator.h
++++ b/ov_msckf/src/state/Propagator.h
+@@ -26,6 +26,7 @@
+ #include <memory>
+ #include <mutex>
+ 
++#include "state/StateOptions.h"
+ #include "utils/sensor_data.h"
+ 
+ #include "utils/NoiseManager.h"
+@@ -236,8 +237,8 @@ protected:
+    * @param F State-transition matrix over the interval
+    * @param Qd Discrete-time noise covariance over the interval
+    */
+-  void predict_and_compute(std::shared_ptr<State> state, const ov_core::ImuData &data_minus, const ov_core::ImuData &data_plus,
+-                           Eigen::MatrixXd &F, Eigen::MatrixXd &Qd);
++  void predict_and_compute(std::shared_ptr<State> state, const ov_core::ImuData &data_prev, const ov_core::ImuData &data_minus,
++                           const ov_core::ImuData &data_plus, Eigen::MatrixXd &F, Eigen::MatrixXd &Qd);
+ 
+   /**
+    * @brief Discrete imu mean propagation.
+@@ -431,6 +432,33 @@ protected:
+                                 const Eigen::Vector3d &w_uncorrected, const Eigen::Vector3d &a_uncorrected, const Eigen::Vector4d &new_q,
+                                 const Eigen::Vector3d &new_v, const Eigen::Vector3d &new_p, Eigen::MatrixXd &F, Eigen::MatrixXd &G);
+ 
++  /// Learned nominal gyro-bias dynamics f_g(x, u, theta).
++  Eigen::Vector3d learned_gyro_bias_dynamics(std::shared_ptr<State> state, const Eigen::Vector3d &bg, const Eigen::Vector3d &ba,
++                                             const Eigen::Vector3d &wm, const Eigen::Vector3d &am, const Eigen::Matrix<double, 6, 1> &imu_delta,
++                                             const Eigen::Matrix3d &R_Gtoi) const;
++
++  /// Learned nominal accel-bias dynamics f_a(x, u, theta).
++  Eigen::Vector3d learned_accel_bias_dynamics(std::shared_ptr<State> state, const Eigen::Vector3d &bg, const Eigen::Vector3d &ba,
++                                              const Eigen::Vector3d &wm, const Eigen::Vector3d &am,
++                                              const Eigen::Matrix<double, 6, 1> &imu_delta, const Eigen::Matrix3d &R_Gtoi) const;
++
++  /// First-order integration of the learned nominal bias dynamics over one IMU interval.
++  void predict_learned_biases(std::shared_ptr<State> state, double dt, const Eigen::Vector3d &wm, const Eigen::Vector3d &am,
++                              const Eigen::Matrix<double, 6, 1> &imu_delta, const Eigen::Matrix3d &R_Gtoi, Eigen::Vector3d &new_bg,
++                              Eigen::Vector3d &new_ba) const;
++
++  /// Numerical bias Jacobian of [f_g; f_a] with respect to [bg; ba].
++  Eigen::Matrix<double, 6, 6> learned_bias_dynamics_jacobian(std::shared_ptr<State> state, const Eigen::Vector3d &bg,
++                                                             const Eigen::Vector3d &ba, const Eigen::Vector3d &wm,
++                                                             const Eigen::Vector3d &am, const Eigen::Matrix<double, 6, 1> &imu_delta,
++                                                             const Eigen::Matrix3d &R_Gtoi) const;
++
++  /// Build the PLATO phys_delta feature vector used by the exported Debias_IMU model.
++  Eigen::VectorXd learned_phys_delta_features(const StateOptions::LearnedBiasPhysDeltaModel &model, bool gyro_model,
++                                              const Eigen::Vector3d &bg, const Eigen::Vector3d &ba, const Eigen::Vector3d &wm,
++                                              const Eigen::Vector3d &am, const Eigen::Matrix<double, 6, 1> &imu_delta,
++                                              const Eigen::Matrix3d &R_Gtoi) const;
++
+   /// Container for the noise values
+   NoiseManager _noises;
+ 
+diff --git a/ov_msckf/src/state/StateHelper.cpp b/ov_msckf/src/state/StateHelper.cpp
+index 0c89c56..38de172 100644
+--- a/ov_msckf/src/state/StateHelper.cpp
++++ b/ov_msckf/src/state/StateHelper.cpp
+@@ -98,6 +98,7 @@ void StateHelper::EKFPropagation(std::shared_ptr<State> state, const std::vector
+   state->_Cov.block(start_id, 0, phi_size, total_size) = Cov_PhiT.transpose();
+   state->_Cov.block(0, start_id, total_size, phi_size) = Cov_PhiT;
+   state->_Cov.block(start_id, start_id, phi_size, phi_size) = Phi_Cov_PhiT;
++  enforce_frozen_imu_bias(state);
+ 
+   // We should check if we are not positive semi-definitate (i.e. negative diagionals is not s.p.d)
+   Eigen::VectorXd diags = state->_Cov.diagonal();
+@@ -183,9 +184,14 @@ void StateHelper::EKFUpdate(std::shared_ptr<State> state, const std::vector<std:
+ 
+   // Calculate our delta and update all our active states
+   Eigen::VectorXd dx = K * res;
++  if (state->_options.freeze_imu_bias) {
++    dx.block(state->_imu->bg()->id(), 0, state->_imu->bg()->size(), 1).setZero();
++    dx.block(state->_imu->ba()->id(), 0, state->_imu->ba()->size(), 1).setZero();
++  }
+   for (size_t i = 0; i < state->_variables.size(); i++) {
+     state->_variables.at(i)->update(dx.block(state->_variables.at(i)->id(), 0, state->_variables.at(i)->size(), 1));
+   }
++  enforce_frozen_imu_bias(state);
+ 
+   // If we are doing online intrinsic calibration we should update our camera objects
+   // NOTE: is this the best place to put this update logic??? probably..
+@@ -196,6 +202,49 @@ void StateHelper::EKFUpdate(std::shared_ptr<State> state, const std::vector<std:
+   }
+ }
+ 
++void StateHelper::enforce_frozen_imu_bias(std::shared_ptr<State> state) {
++
++  if (!state->_options.freeze_imu_bias) {
++    return;
++  }
++
++  Eigen::MatrixXd imu_x = state->_imu->value();
++  imu_x.block(10, 0, 3, 1) = state->_options.frozen_imu_bias_g;
++  imu_x.block(13, 0, 3, 1) = state->_options.frozen_imu_bias_a;
++  state->_imu->set_value(imu_x);
++
++  Eigen::MatrixXd imu_fej = state->_imu->fej();
++  imu_fej.block(10, 0, 3, 1) = state->_options.frozen_imu_bias_g;
++  imu_fej.block(13, 0, 3, 1) = state->_options.frozen_imu_bias_a;
++  state->_imu->set_fej(imu_fej);
++
++  const double cov = (state->_options.frozen_imu_bias_cov > 0.0) ? state->_options.frozen_imu_bias_cov : 0.0;
++  auto freeze_cov_block = [&](int id, int size) {
++    if (id < 0 || state->_Cov.rows() == 0) {
++      return;
++    }
++    state->_Cov.block(id, 0, size, state->_Cov.cols()).setZero();
++    state->_Cov.block(0, id, state->_Cov.rows(), size).setZero();
++    state->_Cov.block(id, id, size, size) = cov * Eigen::MatrixXd::Identity(size, size);
++  };
++  freeze_cov_block(state->_imu->bg()->id(), state->_imu->bg()->size());
++  freeze_cov_block(state->_imu->ba()->id(), state->_imu->ba()->size());
++}
++
++void StateHelper::add_diagonal_covariance(std::shared_ptr<State> state, std::shared_ptr<Type> variable, double variance) {
++
++  if (state == nullptr || variable == nullptr || variance <= 0.0 || state->_Cov.rows() == 0) {
++    return;
++  }
++  if (variable->id() < 0 || variable->id() + variable->size() > state->_Cov.rows()) {
++    return;
++  }
++
++  state->_Cov.block(variable->id(), variable->id(), variable->size(), variable->size()).diagonal().array() += variance;
++  state->_Cov = state->_Cov.selfadjointView<Eigen::Upper>();
++  enforce_frozen_imu_bias(state);
++}
++
+ void StateHelper::set_initial_covariance(std::shared_ptr<State> state, const Eigen::MatrixXd &covariance,
+                                          const std::vector<std::shared_ptr<ov_type::Type>> &order) {
+ 
+@@ -221,6 +270,7 @@ void StateHelper::set_initial_covariance(std::shared_ptr<State> state, const Eig
+     i_index += order[i]->size();
+   }
+   state->_Cov = state->_Cov.selfadjointView<Eigen::Upper>();
++  enforce_frozen_imu_bias(state);
+ }
+ 
+ Eigen::MatrixXd StateHelper::get_marginal_covariance(std::shared_ptr<State> state,
+@@ -642,4 +692,4 @@ void StateHelper::marginalize_slam(std::shared_ptr<State> state) {
+       it0++;
+     }
+   }
+-}
+\ No newline at end of file
++}
+diff --git a/ov_msckf/src/state/StateHelper.h b/ov_msckf/src/state/StateHelper.h
+index 6c74013..50be836 100644
+--- a/ov_msckf/src/state/StateHelper.h
++++ b/ov_msckf/src/state/StateHelper.h
+@@ -88,6 +88,20 @@ public:
+   static void EKFUpdate(std::shared_ptr<State> state, const std::vector<std::shared_ptr<ov_type::Type>> &H_order, const Eigen::MatrixXd &H,
+                         const Eigen::VectorXd &res, const Eigen::MatrixXd &R);
+ 
++  /**
++   * @brief Enforces fixed IMU gyro/accel bias values and zero bias covariance when freeze_imu_bias is enabled.
++   * @param state Pointer to state
++   */
++  static void enforce_frozen_imu_bias(std::shared_ptr<State> state);
++
++  /**
++   * @brief Adds isotropic diagonal covariance to a variable.
++   * @param state Pointer to state
++   * @param variable Variable or sub-variable to inflate
++   * @param variance Variance to add to each error dimension
++   */
++  static void add_diagonal_covariance(std::shared_ptr<State> state, std::shared_ptr<ov_type::Type> variable, double variance);
++
+   /**
+    * @brief This will set the initial covaraince of the specified state elements.
+    * Will also ensure that proper cross-covariances are inserted.
+diff --git a/ov_msckf/src/state/StateOptions.h b/ov_msckf/src/state/StateOptions.h
+index 95836e9..5685e38 100644
+--- a/ov_msckf/src/state/StateOptions.h
++++ b/ov_msckf/src/state/StateOptions.h
+@@ -22,6 +22,12 @@
+ #ifndef OV_MSCKF_STATE_OPTIONS_H
+ #define OV_MSCKF_STATE_OPTIONS_H
+ 
++#include <Eigen/Eigen>
++#include <cassert>
++#include <cmath>
++#include <string>
++#include <vector>
++
+ #include "types/LandmarkRepresentation.h"
+ #include "utils/opencv_yaml_parse.h"
+ #include "utils/print.h"
+@@ -34,6 +40,35 @@ namespace ov_msckf {
+  */
+ struct StateOptions {
+ 
++  /// Exported PLATO phys_delta bias dynamics model.
++  struct LearnedBiasPhysDeltaModel {
++    bool loaded = false;
++    int feature_dim = 54;
++    int hidden_dim = 128;
++    double bias_scale = 1.0;
++    double rate_bound = 1.0;
++    bool use_acc_bias = true;
++    Eigen::MatrixXd linear_phys_weight;
++    Eigen::Vector3d linear_phys_bias = Eigen::Vector3d::Zero();
++    Eigen::MatrixXd residual0_weight;
++    Eigen::VectorXd residual0_bias;
++    Eigen::MatrixXd residual2_weight;
++    Eigen::VectorXd residual2_bias;
++    Eigen::MatrixXd residual4_weight;
++    Eigen::Vector3d residual4_bias = Eigen::Vector3d::Zero();
++
++    Eigen::Vector3d evaluate(const Eigen::VectorXd &features) const {
++      assert(loaded);
++      assert(features.rows() == feature_dim);
++      Eigen::VectorXd hidden0 = residual0_weight * features + residual0_bias;
++      hidden0 = hidden0.unaryExpr([](double x) { return 0.5 * x * (1.0 + std::erf(x / std::sqrt(2.0))); });
++      Eigen::VectorXd hidden1 = residual2_weight * hidden0 + residual2_bias;
++      hidden1 = hidden1.unaryExpr([](double x) { return 0.5 * x * (1.0 + std::erf(x / std::sqrt(2.0))); });
++      Eigen::Vector3d logits = linear_phys_weight * features + linear_phys_bias + residual4_weight * hidden1 + residual4_bias;
++      return rate_bound * logits.array().tanh().matrix();
++    }
++  };
++
+   /// Bool to determine whether or not to do first estimate Jacobians
+   bool do_fej = true;
+ 
+@@ -64,6 +99,41 @@ struct StateOptions {
+   /// What model our IMU intrinsics are
+   ImuModel imu_model = ImuModel::KALIBR;
+ 
++  /// Use a learned nominal bias dynamics model instead of constant-bias nominal propagation.
++  bool use_learned_bias_dynamics = false;
++
++  /// Keep IMU gyro/accel biases fixed at configured values and prevent EKF online bias estimation.
++  bool freeze_imu_bias = false;
++
++  /// Fixed bias values used when freeze_imu_bias is enabled.
++  Eigen::Vector3d frozen_imu_bias_g = Eigen::Vector3d::Zero();
++  Eigen::Vector3d frozen_imu_bias_a = Eigen::Vector3d::Zero();
++
++  /// Tiny covariance kept on frozen bias states so the covariance matrix remains well formed.
++  double frozen_imu_bias_cov = 1e-12;
++
++  /// Learned-bias model type. "affine" preserves the lightweight debug hook; "phys_delta" uses exported PLATO MLP weights.
++  std::string learned_bias_dynamics_model = "affine";
++
++  /// Path to exported learned-bias weights when learned_bias_dynamics_model is "phys_delta".
++  std::string learned_bias_dynamics_weights = "";
++
++  /// Affine learned gyro-bias dynamics: dbg/dt = c + Wb*bg + Ww*wm + Wa*am.
++  Eigen::Vector3d learned_bg_c = Eigen::Vector3d::Zero();
++  Eigen::Matrix3d learned_bg_Wb = Eigen::Matrix3d::Zero();
++  Eigen::Matrix3d learned_bg_Ww = Eigen::Matrix3d::Zero();
++  Eigen::Matrix3d learned_bg_Wa = Eigen::Matrix3d::Zero();
++
++  /// Affine learned accel-bias dynamics: dba/dt = c + Wb*ba + Ww*wm + Wa*am.
++  Eigen::Vector3d learned_ba_c = Eigen::Vector3d::Zero();
++  Eigen::Matrix3d learned_ba_Wb = Eigen::Matrix3d::Zero();
++  Eigen::Matrix3d learned_ba_Ww = Eigen::Matrix3d::Zero();
++  Eigen::Matrix3d learned_ba_Wa = Eigen::Matrix3d::Zero();
++
++  /// Exported PLATO phys_delta gyro and accel models.
++  LearnedBiasPhysDeltaModel learned_bg_phys_delta;
++  LearnedBiasPhysDeltaModel learned_ba_phys_delta;
++
+   /// Max clone size of sliding window
+   int max_clone_size = 11;
+ 
+@@ -118,6 +188,33 @@ struct StateOptions {
+       parser->parse_config("calib_imu_intrinsics", do_calib_imu_intrinsics);
+       parser->parse_config("calib_imu_g_sensitivity", do_calib_imu_g_sensitivity);
+ 
++      // Optional learned nominal bias dynamics. Defaults keep the original OpenVINS behavior.
++      parser->parse_config("use_learned_bias_dynamics", use_learned_bias_dynamics, false);
++      parser->parse_config("freeze_imu_bias", freeze_imu_bias, false);
++      parse_vector3(parser, "frozen_imu_bias_g", frozen_imu_bias_g);
++      parse_vector3(parser, "frozen_imu_bias_a", frozen_imu_bias_a);
++      parser->parse_config("frozen_imu_bias_cov", frozen_imu_bias_cov, false);
++      parser->parse_config("learned_bias_dynamics_model", learned_bias_dynamics_model, false);
++      parser->parse_config("learned_bias_dynamics_weights", learned_bias_dynamics_weights, false);
++      parse_vector3(parser, "learned_bias_dynamics_bg_c", learned_bg_c);
++      parse_matrix3(parser, "learned_bias_dynamics_bg_Wb", learned_bg_Wb);
++      parse_matrix3(parser, "learned_bias_dynamics_bg_Ww", learned_bg_Ww);
++      parse_matrix3(parser, "learned_bias_dynamics_bg_Wa", learned_bg_Wa);
++      parse_vector3(parser, "learned_bias_dynamics_ba_c", learned_ba_c);
++      parse_matrix3(parser, "learned_bias_dynamics_ba_Wb", learned_ba_Wb);
++      parse_matrix3(parser, "learned_bias_dynamics_ba_Ww", learned_ba_Ww);
++      parse_matrix3(parser, "learned_bias_dynamics_ba_Wa", learned_ba_Wa);
++      if (freeze_imu_bias && use_learned_bias_dynamics) {
++        PRINT_WARNING(YELLOW "freeze_imu_bias=true keeps bg/ba fixed and overrides learned nominal bias propagation.\n" RESET);
++      }
++      if (use_learned_bias_dynamics && !freeze_imu_bias && learned_bias_dynamics_model == "phys_delta") {
++        load_phys_delta_weights(parser);
++      } else if (use_learned_bias_dynamics && !freeze_imu_bias && learned_bias_dynamics_model != "affine") {
++        PRINT_ERROR(RED "invalid learned_bias_dynamics_model: %s\n" RESET, learned_bias_dynamics_model.c_str());
++        PRINT_ERROR(RED "please select a valid model: affine, phys_delta\n" RESET);
++        std::exit(EXIT_FAILURE);
++      }
++
+       // State parameters
+       parser->parse_config("max_clones", max_clone_size);
+       parser->parse_config("max_slam", max_slam_features);
+@@ -162,6 +259,11 @@ struct StateOptions {
+     PRINT_DEBUG("  - calib_cam_timeoffset: %d\n", do_calib_camera_timeoffset);
+     PRINT_DEBUG("  - calib_imu_intrinsics: %d\n", do_calib_imu_intrinsics);
+     PRINT_DEBUG("  - calib_imu_g_sensitivity: %d\n", do_calib_imu_g_sensitivity);
++    PRINT_DEBUG("  - use_learned_bias_dynamics: %d\n", use_learned_bias_dynamics);
++    PRINT_DEBUG("  - freeze_imu_bias: %d\n", freeze_imu_bias);
++    PRINT_DEBUG("  - frozen_imu_bias_g: %.6f, %.6f, %.6f\n", frozen_imu_bias_g(0), frozen_imu_bias_g(1), frozen_imu_bias_g(2));
++    PRINT_DEBUG("  - frozen_imu_bias_a: %.6f, %.6f, %.6f\n", frozen_imu_bias_a(0), frozen_imu_bias_a(1), frozen_imu_bias_a(2));
++    PRINT_DEBUG("  - learned_bias_dynamics_model: %s\n", learned_bias_dynamics_model.c_str());
+     PRINT_DEBUG("  - imu_model: %d\n", imu_model);
+     PRINT_DEBUG("  - max_clones: %d\n", max_clone_size);
+     PRINT_DEBUG("  - max_slam: %d\n", max_slam_features);
+@@ -173,8 +275,127 @@ struct StateOptions {
+     PRINT_DEBUG("  - feat_rep_slam: %s\n", ov_type::LandmarkRepresentation::as_string(feat_rep_slam).c_str());
+     PRINT_DEBUG("  - feat_rep_aruco: %s\n", ov_type::LandmarkRepresentation::as_string(feat_rep_aruco).c_str());
+   }
++
++private:
++  static void parse_vector3(const std::shared_ptr<ov_core::YamlParser> &parser, const std::string &key, Eigen::Vector3d &value) {
++    std::vector<double> data;
++    parser->parse_config(key, data, false);
++    if (data.empty()) {
++      return;
++    }
++    if (data.size() != 3) {
++      PRINT_ERROR(RED "invalid %s size: expected 3 values, got %zu\n" RESET, key.c_str(), data.size());
++      std::exit(EXIT_FAILURE);
++    }
++    value << data.at(0), data.at(1), data.at(2);
++  }
++
++  static void parse_matrix3(const std::shared_ptr<ov_core::YamlParser> &parser, const std::string &key, Eigen::Matrix3d &value) {
++    std::vector<double> data;
++    parser->parse_config(key, data, false);
++    if (data.empty()) {
++      return;
++    }
++    if (data.size() != 9) {
++      PRINT_ERROR(RED "invalid %s size: expected 9 row-major values, got %zu\n" RESET, key.c_str(), data.size());
++      std::exit(EXIT_FAILURE);
++    }
++    value << data.at(0), data.at(1), data.at(2), data.at(3), data.at(4), data.at(5), data.at(6), data.at(7), data.at(8);
++  }
++
++  static std::string resolve_weight_path(const std::shared_ptr<ov_core::YamlParser> &parser, const std::string &path) {
++    if (path.empty() || path.at(0) == '/') {
++      return path;
++    }
++    return parser->get_config_folder() + path;
++  }
++
++  static std::vector<double> read_vector_node(const cv::FileStorage &fs, const std::string &key, int expected_size) {
++    std::vector<double> data;
++    fs[key] >> data;
++    if ((int)data.size() != expected_size) {
++      PRINT_ERROR(RED "invalid learned bias weight %s size: expected %d values, got %zu\n" RESET, key.c_str(), expected_size, data.size());
++      std::exit(EXIT_FAILURE);
++    }
++    return data;
++  }
++
++  static Eigen::Vector3d read_vector3_node(const cv::FileStorage &fs, const std::string &key) {
++    std::vector<double> data = read_vector_node(fs, key, 3);
++    Eigen::Vector3d value;
++    value << data.at(0), data.at(1), data.at(2);
++    return value;
++  }
++
++  static Eigen::VectorXd read_vector_node_eigen(const cv::FileStorage &fs, const std::string &key, int size) {
++    std::vector<double> data = read_vector_node(fs, key, size);
++    Eigen::VectorXd value(size);
++    for (int i = 0; i < size; i++) {
++      value(i) = data.at(i);
++    }
++    return value;
++  }
++
++  static Eigen::MatrixXd read_matrix_node(const cv::FileStorage &fs, const std::string &key, int rows, int cols) {
++    std::vector<double> data = read_vector_node(fs, key, rows * cols);
++    Eigen::MatrixXd value(rows, cols);
++    for (int r = 0; r < rows; r++) {
++      for (int c = 0; c < cols; c++) {
++        value(r, c) = data.at(r * cols + c);
++      }
++    }
++    return value;
++  }
++
++  static void load_one_phys_delta_model(const cv::FileStorage &fs, const std::string &prefix, LearnedBiasPhysDeltaModel &model) {
++    int feature_dim = 54;
++    int hidden_dim = 128;
++    double bias_scale = 1.0;
++    double rate_bound = 1.0;
++    int use_acc_bias = 1;
++    fs[prefix + "_feature_dim"] >> feature_dim;
++    fs[prefix + "_hidden_dim"] >> hidden_dim;
++    fs[prefix + "_bias_scale"] >> bias_scale;
++    fs[prefix + "_rate_bound"] >> rate_bound;
++    fs[prefix + "_use_acc_bias"] >> use_acc_bias;
++    model.feature_dim = feature_dim;
++    model.hidden_dim = hidden_dim;
++    model.bias_scale = bias_scale;
++    model.rate_bound = rate_bound;
++    model.use_acc_bias = (use_acc_bias != 0);
++    model.linear_phys_weight = read_matrix_node(fs, prefix + "_linear_phys_weight", 3, feature_dim);
++    model.linear_phys_bias = read_vector3_node(fs, prefix + "_linear_phys_bias");
++    model.residual0_weight = read_matrix_node(fs, prefix + "_residual0_weight", hidden_dim, feature_dim);
++    model.residual0_bias = read_vector_node_eigen(fs, prefix + "_residual0_bias", hidden_dim);
++    model.residual2_weight = read_matrix_node(fs, prefix + "_residual2_weight", hidden_dim, hidden_dim);
++    model.residual2_bias = read_vector_node_eigen(fs, prefix + "_residual2_bias", hidden_dim);
++    model.residual4_weight = read_matrix_node(fs, prefix + "_residual4_weight", 3, hidden_dim);
++    model.residual4_bias = read_vector3_node(fs, prefix + "_residual4_bias");
++    model.loaded = true;
++  }
++
++  void load_phys_delta_weights(const std::shared_ptr<ov_core::YamlParser> &parser) {
++    if (learned_bias_dynamics_weights.empty()) {
++      PRINT_ERROR(RED "use_learned_bias_dynamics=true and learned_bias_dynamics_model=phys_delta require learned_bias_dynamics_weights\n" RESET);
++      std::exit(EXIT_FAILURE);
++    }
++    const std::string weight_path = resolve_weight_path(parser, learned_bias_dynamics_weights);
++    cv::FileStorage fs(weight_path, cv::FileStorage::READ);
++    if (!fs.isOpened()) {
++      PRINT_ERROR(RED "unable to open learned bias dynamics weights!\n%s\n" RESET, weight_path.c_str());
++      std::exit(EXIT_FAILURE);
++    }
++    std::string model_type;
++    fs["model_type"] >> model_type;
++    if (model_type != "phys_delta") {
++      PRINT_ERROR(RED "learned bias dynamics weight file has invalid model_type: %s\n" RESET, model_type.c_str());
++      std::exit(EXIT_FAILURE);
++    }
++    load_one_phys_delta_model(fs, "gyro", learned_bg_phys_delta);
++    load_one_phys_delta_model(fs, "accel", learned_ba_phys_delta);
++  }
+ };
+ 
+ } // namespace ov_msckf
+ 
+-#endif // OV_MSCKF_STATE_OPTIONS_H
+\ No newline at end of file
++#endif // OV_MSCKF_STATE_OPTIONS_H

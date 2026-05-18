@@ -1,0 +1,40 @@
+%YAML:1.0
+
+# corldata uses the left DAVIS IMU topic.
+# Noise values are inherited from the existing LIASuw 0205 OpenVINS config and
+# should be recalibrated if a corldata-specific Allan variance run becomes available.
+
+imu0:
+  T_i_b:
+    - [1.0, 0.0, 0.0, 0.0]
+    - [0.0, 1.0, 0.0, 0.0]
+    - [0.0, 0.0, 1.0, 0.0]
+    - [0.0, 0.0, 0.0, 1.0]
+  accelerometer_noise_density: 0.0436073667065
+  accelerometer_random_walk: 0.000691276415008
+  gyroscope_noise_density: 0.00363608382743
+  gyroscope_random_walk: 4.54949206016e-05
+  rostopic: /davis_left/imu
+  time_offset: 0.0
+  update_rate: 1000.0
+  model: "kalibr"
+  Tw:
+    - [1.0, 0.0, 0.0]
+    - [0.0, 1.0, 0.0]
+    - [0.0, 0.0, 1.0]
+  R_IMUtoGYRO:
+    - [1.0, 0.0, 0.0]
+    - [0.0, 1.0, 0.0]
+    - [0.0, 0.0, 1.0]
+  Ta:
+    - [1.0, 0.0, 0.0]
+    - [0.0, 1.0, 0.0]
+    - [0.0, 0.0, 1.0]
+  R_IMUtoACC:
+    - [1.0, 0.0, 0.0]
+    - [0.0, 1.0, 0.0]
+    - [0.0, 0.0, 1.0]
+  Tg:
+    - [0.0, 0.0, 0.0]
+    - [0.0, 0.0, 0.0]
+    - [0.0, 0.0, 0.0]

@@ -1,0 +1,53 @@
+dataset: corldata
+supervision: gt
+loss_type: se23_gt_supervision
+input_mode: u
+
+data_root: results/debias_imu/corldata_IMU_aligned_gt_vo_ref_1000hz
+cache_dir: results/debias_imu/cache/corldata_imu_aligned_gt_slow_residual_w128_e1801_1000hz
+outputdir: results/debias_imu/corldata_imu_aligned_gt_slow_residual_w128_e1801_1000hz
+
+# PLATO-owned network ablation after the strict Debias_IMU baseline.
+# It keeps the accepted IMU-aligned GT supervision and the same train/test split
+# as the baseline, but replaces the external u_dot network with no-derivative,
+# slow, rate-limited bias dynamics. S04 remains excluded for the GT jump.
+train_seqs: [S00, S01, S02, S03, S05, S07]
+test_seqs: [S13, S15, S20, S21, S22, S23]
+window_size: 128
+dt: 0.001
+batch_size: 1000
+epoch: 1801
+percent_for_val: 0.2
+train_batch_strategy: random_sequence
+
+network_type_Gyro: bw_func_slow_residual
+network_type_Acc: ba_func_slow_residual
+lr_Gyro: 0.005
+lr_Acc: 0.005
+weight_decay_Gyro: 0.000001
+weight_decay_Acc: 0.000001
+gyro_lr_step_size: 300
+acc_lr_step_size: 300
+gyro_lr_gamma: 0.5
+acc_lr_gamma: 0.5
+val_freq: 100
+save_freq: 100
+
+# Acc training uses the SE23 loss in run_liasuw_debias_ad_pipeline.py:
+# log(SE23_gt^-1 * SE23_pred), with equal rotation/velocity/position weights.
+acc_loss_rot_weight: 1.0
+acc_loss_vel_weight: 1.0
+acc_loss_pos_weight: 1.0
+
+# Match the strict baseline testing convention so the comparison is against
+# model_epoch_1800.pt, while best_val_model.pt is still saved for diagnostics.
+use_best_val: false
+readable_val_metrics: true
+
+sg_window_bw: 101
+sg_order_bw: 3
+sg_window_ba: 101
+sg_order_ba: 3
+
+device: cuda
+test_device: cpu
