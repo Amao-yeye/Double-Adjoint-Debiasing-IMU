@@ -1,0 +1,5 @@
+method_label,num_sequences,mean_pos_rmse_m,mean_rot_rmse_deg,mean_pos_mean_m,mean_rot_mean_deg
+gt_mse_conservative_noise,5,0.293700,1.790088,0.261716,1.634106
+gt_nll,5,0.293382,1.868540,0.265158,1.759503
+vo_mse_conservative_noise,5,0.294692,1.834842,0.260035,1.718432
+vo_nll,5,0.288634,1.836876,0.255903,1.717593

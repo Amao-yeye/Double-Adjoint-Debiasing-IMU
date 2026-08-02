@@ -1,0 +1,5 @@
+method,num_sequences,mean_pos_rmse_m,mean_rot_rmse_deg,mean_pos_mean_m,mean_rot_mean_deg
+gt_mse,5,0.183322,1.457765,0.162944,1.358966
+gt_nll,5,0.293382,1.868540,0.265158,1.759503
+vo_mse,5,0.168486,1.404600,0.153457,1.303609
+vo_nll,5,0.288634,1.836876,0.255903,1.717593

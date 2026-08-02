@@ -1,0 +1,101 @@
+"""PLATO losses and training helpers for Debias_IMU."""
+
+from .losses import (
+    make_se23_from_solution,
+    pose_block_mse,
+    pose_mse_loss,
+    se23_block_mse,
+    se23_log_residual,
+    se23_mse_loss,
+    se23_pose_residual,
+)
+from .covariance import (
+    build_se23_precision,
+    preintegrate_interval_covariance,
+    preintegrate_supervision_covariances,
+    se23_Gd,
+    se23_phi,
+)
+from .analytic_gradient import (
+    adjoint_bias_gradient,
+    invariant_transition_matrices,
+    weighted_se23_mse_state_gradient,
+)
+from .bias_adjoint import accumulate_ba_euler_adjoint_gradients
+from .gyro_adjoint import accumulate_bg_euler_adjoint_gradients
+from .so3_analytic_gradient import (
+    so3_gyro_bias_gradient,
+    so3_invariant_residual,
+    weighted_so3_mse_state_gradient,
+)
+from .nll import (
+    PlatoNoiseParams,
+    full_state_nees,
+    full_state_nll,
+    pose_nees,
+    pose_nll,
+    sparse_full_state_nees,
+    sparse_full_state_nll,
+    sparse_pose_nees,
+    sparse_pose_nll,
+    woodbury_nees,
+    woodbury_nll,
+)
+from .supervision import (
+    PlatoSupervisionBatch,
+    PoseTrajectory,
+    align_vo_first_gt,
+    build_supervised_indices,
+    gather_state_window,
+    get_gt_se23_supervision_batch,
+    get_vo_pose_supervision_batch,
+    interpolate_pose,
+    load_vo_for_sequence,
+    read_vo_pose_file,
+    resolve_supervision_stride,
+)
+
+__all__ = [
+    "PlatoSupervisionBatch",
+    "PlatoNoiseParams",
+    "PoseTrajectory",
+    "accumulate_ba_euler_adjoint_gradients",
+    "accumulate_bg_euler_adjoint_gradients",
+    "adjoint_bias_gradient",
+    "align_vo_first_gt",
+    "build_se23_precision",
+    "build_supervised_indices",
+    "full_state_nees",
+    "full_state_nll",
+    "gather_state_window",
+    "get_gt_se23_supervision_batch",
+    "get_vo_pose_supervision_batch",
+    "interpolate_pose",
+    "invariant_transition_matrices",
+    "load_vo_for_sequence",
+    "make_se23_from_solution",
+    "pose_block_mse",
+    "pose_mse_loss",
+    "pose_nees",
+    "pose_nll",
+    "preintegrate_interval_covariance",
+    "preintegrate_supervision_covariances",
+    "read_vo_pose_file",
+    "resolve_supervision_stride",
+    "se23_Gd",
+    "se23_block_mse",
+    "se23_log_residual",
+    "se23_mse_loss",
+    "se23_phi",
+    "se23_pose_residual",
+    "so3_gyro_bias_gradient",
+    "so3_invariant_residual",
+    "sparse_full_state_nees",
+    "sparse_full_state_nll",
+    "sparse_pose_nees",
+    "sparse_pose_nll",
+    "woodbury_nees",
+    "woodbury_nll",
+    "weighted_se23_mse_state_gradient",
+    "weighted_so3_mse_state_gradient",
+]
