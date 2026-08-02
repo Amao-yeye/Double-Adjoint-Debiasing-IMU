@@ -1,0 +1,24 @@
+dataset: euroc
+train_supervision: vo
+trainval_gt_root: external/Debias_IMU/rss_debiasing_restart/Debias_IMU/dataset/Euroc_VO
+trainval_gt_source: stereo_estimate_aligned_body
+supervision_timing: imu
+exclude_train_seq:
+  - V2_03_difficult
+cache_dir: results/debias_imu/cache/EUROC_no_udot_vo_body_w64_noV203
+test_cache_dir: results/debias_imu/cache/EUROC_test_gt
+outputdir: results/debias_imu/EUROC_no_udot_vo_body_w64_analytic_e1801_b1000_noV203
+network_type_Gyro: bw_func_net_no_udot
+network_type_Acc: ba_func_net_no_udot
+gyro_loss: analytic
+acc_loss: analytic
+loss_window: 64
+batch_size: 1000
+epoch: 1801
+val_freq: 100
+save_freq: 100
+device: cuda
+test_device: cpu
+use_best_val: false
+readable_val_metrics: false
+inner_vjp: local_ad

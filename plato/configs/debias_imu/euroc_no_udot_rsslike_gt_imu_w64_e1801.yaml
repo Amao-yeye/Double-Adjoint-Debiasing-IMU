@@ -1,0 +1,41 @@
+dataset: euroc
+train_supervision: gt
+supervision_timing: imu
+cache_dir: results/debias_imu/cache/EUROC_no_udot_rsslike_gt_imu_w64
+test_cache_dir: results/debias_imu/cache/EUROC_test_gt
+outputdir: results/debias_imu/EUROC_no_udot_rsslike_gt_imu_w64_e1801_b1000
+
+# Full RSS-like MSE run after the e301 screen improved monotonically from
+# epoch 100 to 300 but remained short of the RSS baseline.
+network_type_Gyro: bw_func_net_no_udot
+network_type_Acc: ba_func_net_no_udot
+gyro_loss: ad
+acc_loss: rss
+acc_loss_type: rss
+loss_window: 64
+batch_size: 1000
+epoch: 1801
+lr_Gyro: 0.005
+lr_Acc: 0.005
+weight_decay_Gyro: 0.000001
+weight_decay_Acc: 0.000001
+gyro_lr_step_size: 300
+gyro_lr_gamma: 0.5
+acc_lr_step_size: 300
+acc_lr_gamma: 0.5
+val_freq: 100
+save_freq: 100
+train_batch_strategy: random_sequence
+percent_for_val: 0.2
+sg_window_bw: 1
+sg_order_bw: 0
+sg_window_ba: 1
+sg_order_ba: 0
+dt: 0.005
+initial_bias_mode: first
+initial_bias_window_s: 1.0
+device: cuda
+test_device: cpu
+use_best_val: false
+readable_val_metrics: false
+skip_plots: true

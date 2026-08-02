@@ -5,6 +5,8 @@ cmake-build-*/
 out/
 bin/
 lib/
+!plato/lib/
+!plato/lib/**
 
 # CMake artifacts
 CMakeCache.txt

@@ -1,0 +1,67 @@
+dataset: corldata
+supervision: gt
+loss_type: se23_gt_supervision
+input_mode: u
+trainval_supervision_source: vo_imu_noninterp
+vo_supervision_world_frame: vo
+vo_gap_tolerance_s: 0.015
+source_position_sg_window: 101
+source_position_sg_order: 3
+pseudo_gt_root: results/pseudo_gt/corldata
+gravity_accel_world: [0.0, 0.0, -9.7803]
+
+data_root: results/debias_imu/corldata_pseudogt_refs_train_s00s02s03s07_test_s13s15s20s21s22s23
+cache_dir: results/debias_imu/cache/corldata_vo_poseonly_sg101_conservativeacc_w80_e101_selected
+outputdir: results/debias_imu/corldata_vo_poseonly_sg101_conservativeacc_w80_e101_selected
+
+# Pure VO-supervised Acc screen with bounded conservative accel-bias dynamics.
+# Gyro is the best VO-trained gyro from the corresponding no-udot pose-only
+# screen; Acc starts from constant-bias behavior and can only learn bounded
+# slow residual dynamics, reducing long-rollout instability.
+train_seqs: [S00, S02, S03, S07]
+val_seqs: [S00, S02, S03, S07]
+test_seqs: [S13, S15, S20, S22]
+window_size: 80
+dt: 0.001
+batch_size: 64
+epoch: 101
+percent_for_val: 0.2
+train_batch_strategy: random_sequence
+
+network_type_Gyro: bw_func_net_no_udot
+network_type_Acc: ba_func_conservative_residual
+bw_model_path: results/debias_imu/corldata_vo_poseonly_sg101_y0label_w80_e101_selected/Gyro_weights/best_val_model.pt
+skip_gyro_train: true
+
+lr_Gyro: 0.005
+lr_Acc: 0.0005
+weight_decay_Gyro: 0.000001
+weight_decay_Acc: 0.000001
+gyro_lr_step_size: 50
+acc_lr_step_size: 50
+gyro_lr_gamma: 0.5
+acc_lr_gamma: 0.5
+val_freq: 10
+save_freq: 25
+
+acc_loss_rot_weight: 1.0
+acc_loss_vel_weight: 0.0
+acc_loss_pos_weight: 1.0
+train_initial_bw_mode: label
+train_initial_ba_mode: label
+
+use_best_val: true
+readable_val_metrics: true
+skip_test: true
+recompute_cache: true
+
+sg_window_bw: 31
+sg_order_bw: 3
+sg_window_ba: 101
+sg_order_ba: 3
+
+initial_bias_mode: median_window
+initial_bias_window_s: 5.0
+
+device: cuda
+test_device: cuda

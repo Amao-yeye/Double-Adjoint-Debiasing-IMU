@@ -1,0 +1,89 @@
+dataset: corldata
+supervision: gt
+loss_type: se23_gt_supervision
+input_mode: u
+trainval_supervision_source: mocap_200hz
+
+model:
+  type: bias_dynamics_node
+  use_udot: false
+loss:
+  type: trajectory_state_nll
+  covariance_scaling: 1.0
+  use_logdet: true
+supervision_config:
+  mode: sparse
+  stride: 8
+  max_supervised_states: 16
+  align_to_imu_frame: true
+
+data_root: results/debias_imu/corldata_IMU_aligned_gt_vo_ref_1000hz
+cache_dir: results/debias_imu/cache/corldata_slow_residual_w320_trajectory_nll_covonly_from_e1801
+outputdir: results/debias_imu/corldata_slow_residual_w320_trajectory_nll_covonly_from_e1801
+
+# Unified no-u_dot architecture counterpart to the EuRoC slow_residual run.
+# Stage 2 freezes the SE23 mean and learns scalar IMU noise with the full
+# trajectory-state NLL.
+train_seqs: [S00, S01, S02, S03, S05, S07]
+test_seqs: [S13, S15, S20, S21, S22, S23]
+window_size: 320
+# corldata IMU is 1000 Hz here: (320 - 1) * 0.001 ~= 0.319 s.
+dt: 0.001
+batch_size: 32
+epoch: 21
+percent_for_val: 0.2
+train_batch_strategy: random_sequence
+
+network_type_Gyro: bw_func_slow_residual
+network_type_Acc: ba_func_slow_residual
+bw_model_path: results/debias_imu/corldata_imu_aligned_gt_slow_residual_w128_e1801_1000hz/Gyro_weights/best_val_model.pt
+ba_init_model_path: results/debias_imu/corldata_imu_aligned_gt_slow_residual_w128_e1801_1000hz/Acc_weights/best_val_model.pt
+skip_gyro_train: true
+
+lr_Gyro: 0.005
+lr_Acc: 0.001
+weight_decay_Gyro: 0.000001
+weight_decay_Acc: 0.000001
+gyro_lr_step_size: 150
+acc_lr_step_size: 75
+gyro_lr_gamma: 0.5
+acc_lr_gamma: 0.5
+val_freq: 5
+save_freq: 10
+
+acc_loss_type: trajectory_nll
+interval_nll_mode: nll_cov_only
+interval_sigma_a_nominal: 0.0030
+interval_sigma_g_nominal: 0.00026
+interval_sigma_a_floor2: 0.0000000001
+interval_sigma_g_floor2: 0.000000000001
+interval_target_cov_floor: 0.000000001
+interval_jitter: 0.00000001
+interval_lr_sigma: 0.005
+interval_prior_lambda_a: 0.001
+interval_prior_lambda_g: 0.001
+interval_detach_covariance_theta: true
+interval_covariance_gradient_mode: analytic_sensitivity
+interval_debug_covariance_gradients: false
+trajectory_supervision_mode: sparse
+# corldata is 1000 Hz, so 320 IMU steps ~= EuRoC 64 IMU steps at 200 Hz.
+trajectory_supervision_stride: 20
+trajectory_max_supervised_states: 16
+
+acc_loss_rot_weight: 1.0
+acc_loss_vel_weight: 1.0
+acc_loss_pos_weight: 1.0
+
+use_best_val: true
+readable_val_metrics: true
+
+sg_window_bw: 101
+sg_order_bw: 3
+sg_window_ba: 101
+sg_order_ba: 3
+
+initial_bias_mode: first
+initial_bias_window_s: 1.0
+
+device: cuda
+test_device: cpu

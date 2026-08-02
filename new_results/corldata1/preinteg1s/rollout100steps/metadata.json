@@ -1,0 +1,38 @@
+{
+  "sequences": [
+    "S00",
+    "S13"
+  ],
+  "sequence_results": {
+    "S00": "new_results/corldata1/preinteg1s/ours_train_s00_w128_e301_onlytest",
+    "S13": "results/debias_imu/corldata_sparse_endpoint_no_udot_w128_sg101_initmedian5_e301_s00s07_alltest"
+  },
+  "sequence_roles": {
+    "S00": "train",
+    "S13": "test"
+  },
+  "window_label": "100-step",
+  "segment_duration_s": 1.0,
+  "rollout_steps": 100,
+  "segments_per_seq": 4,
+  "candidate_stride_s": 0.5,
+  "edge_margin_s": 5.0,
+  "nonoverlap_s": 1.0,
+  "diverge_threshold_m": 1.0,
+  "gravity": [
+    0.0,
+    0.0,
+    -9.81
+  ],
+  "gt_bias_smoothing": {
+    "gyro_window": 101,
+    "gyro_order": 3,
+    "accel_window": 31,
+    "accel_order": 3
+  },
+  "methods": [
+    "raw",
+    "gt_const_start",
+    "ours"
+  ]
+}

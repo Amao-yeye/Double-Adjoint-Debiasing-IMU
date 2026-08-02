@@ -1,0 +1,67 @@
+dataset: euroc
+train_supervision: vo
+trainval_gt_root: external/Debias_IMU/rss_debiasing_restart/Debias_IMU/dataset/Euroc_VO
+trainval_gt_source: stereo_estimate_aligned_body
+supervision_timing: source
+exclude_train_seq:
+  - V2_03_difficult
+cache_dir: results/debias_imu/cache/EUROC_tiny_acc_fixed_gyro_vo_src64_sg_noV203
+test_cache_dir: results/debias_imu/cache/EUROC_test_gt
+outputdir: results/debias_imu/EUROC_slow_tiny_vo_src64_interval_nll_joint_bgba_from_covonly
+
+# Fair bias-trend experiment:
+# - no u_dot input
+# - same bounded slow-residual architecture for b_g and b_a
+# - pose/VO-supervised interval preintegration NLL
+# - low-LR joint fine-tune from constant-like gyro and cov-only calibrated Acc/noise
+network_type_Gyro: bw_func_slow_residual_tiny
+network_type_Acc: ba_func_slow_residual_tiny
+bw_model_path: results/debias_imu/EUROC_slow_residual_tiny_constinit_gt_w64_sg_ad_e301_b1000/Gyro_weights/model_epoch_0.pt
+ba_init_model_path: results/debias_imu/EUROC_tiny_acc_fixed_gyro_vo_src64_interval_nll_covonly_from_best/Acc_weights/best_val_model.pt
+interval_noise_init_model_path: results/debias_imu/EUROC_tiny_acc_fixed_gyro_vo_src64_interval_nll_covonly_from_best/Acc_weights/best_val_model.pt
+skip_gyro_train: true
+nll_train_gyro: true
+gyro_loss: ad
+acc_loss: se23
+acc_loss_type: interval_nll
+interval_nll_mode: nll_joint
+loss_window: 64
+batch_size: 64
+epoch: 31
+lr_Gyro: 0.0005
+lr_Acc: 0.00001
+weight_decay_Gyro: 0.000001
+weight_decay_Acc: 0.000001
+gyro_lr_step_size: 150
+acc_lr_step_size: 50
+gyro_lr_gamma: 0.5
+acc_lr_gamma: 0.5
+val_freq: 5
+save_freq: 10
+
+interval_sigma_a_nominal: 0.002793442
+interval_sigma_g_nominal: 0.000241539
+interval_sigma_a_floor2: 0.0000000001
+interval_sigma_g_floor2: 0.000000000001
+interval_target_cov_floor: 0.000000001
+interval_jitter: 0.00000001
+interval_lr_sigma: 0.001
+interval_prior_lambda_a: 0.001
+interval_prior_lambda_g: 0.001
+interval_detach_covariance_theta: true
+interval_covariance_gradient_mode: analytic_sensitivity
+interval_debug_covariance_gradients: false
+
+acc_loss_rot_weight: 1.0
+acc_loss_vel_weight: 1.0
+acc_loss_pos_weight: 1.0
+sg_window_bw: 101
+sg_order_bw: 3
+sg_window_ba: 31
+sg_order_ba: 3
+initial_bias_mode: median_window
+initial_bias_window_s: 5.0
+device: cuda
+test_device: cpu
+use_best_val: true
+readable_val_metrics: true

@@ -1,0 +1,79 @@
+dataset: corldata
+supervision: gt
+loss_type: se23_gt_supervision
+input_mode: u
+trainval_supervision_source: vo_imu_noninterp
+vo_supervision_world_frame: vo
+vo_gap_tolerance_s: 0.015
+pseudo_gt_root: results/pseudo_gt/corldata
+gravity_accel_world: [0.0, 0.0, -9.7803]
+
+data_root: results/debias_imu/corldata_pseudogt_refs_train_s00s02s03s07_test_s13s15s20s21s22s23
+cache_dir: results/debias_imu/cache/corldata_vo_interval_nll_from_gt_ours_w80_e11_selected
+outputdir: results/debias_imu/corldata_vo_interval_nll_from_gt_ours_w80_e11_selected
+
+# Conservative VO-supervised fine-tune for the selected comparison table.
+# The initialization is the current GT-supervised interval-NLL Ours checkpoint;
+# the fine-tuning supervision signal is non-interpolated VO pseudo-GT.
+train_seqs: [S00, S02, S03, S07]
+val_seqs: [S00, S02, S03, S07]
+test_seqs: [S13, S15, S20, S22]
+window_size: 80
+dt: 0.001
+batch_size: 64
+epoch: 11
+percent_for_val: 0.2
+train_batch_strategy: random_sequence
+
+network_type_Gyro: bw_func_net_no_udot
+network_type_Acc: ba_func_net_no_udot
+bw_model_path: results/debias_imu/corldata_sparse_endpoint_no_udot_w256_sg101_initmedian5_interval_nll_joint_lr1e5_from_covonly_continue/Gyro_weights/best_val_model.pt
+ba_init_model_path: results/debias_imu/corldata_sparse_endpoint_no_udot_w256_sg101_initmedian5_interval_nll_joint_lr1e5_from_covonly_continue/Acc_weights/best_val_model.pt
+interval_noise_init_model_path: results/debias_imu/corldata_sparse_endpoint_no_udot_w256_sg101_initmedian5_interval_nll_joint_lr1e5_from_covonly_continue/Acc_weights/best_val_model.pt
+skip_gyro_train: true
+
+lr_Gyro: 0.005
+lr_Acc: 0.000001
+weight_decay_Gyro: 0.000001
+weight_decay_Acc: 0.000001
+gyro_lr_step_size: 150
+acc_lr_step_size: 50
+gyro_lr_gamma: 0.5
+acc_lr_gamma: 0.5
+val_freq: 1
+save_freq: 5
+
+acc_loss_type: interval_nll
+interval_nll_mode: nll_joint
+interval_sigma_a_nominal: 0.002793442
+interval_sigma_g_nominal: 0.000241539
+interval_sigma_a_floor2: 0.0000000001
+interval_sigma_g_floor2: 0.000000000001
+interval_target_cov_floor: 0.000000001
+interval_jitter: 0.00000001
+interval_lr_sigma: 0.0005
+interval_prior_lambda_a: 0.001
+interval_prior_lambda_g: 0.001
+interval_detach_covariance_theta: true
+interval_covariance_gradient_mode: analytic_sensitivity
+interval_debug_covariance_gradients: false
+nll_train_gyro: false
+
+acc_loss_rot_weight: 1.0
+acc_loss_vel_weight: 1.0
+acc_loss_pos_weight: 1.0
+
+use_best_val: true
+readable_val_metrics: true
+skip_test: true
+
+sg_window_bw: 31
+sg_order_bw: 3
+sg_window_ba: 31
+sg_order_ba: 3
+
+initial_bias_mode: median_window
+initial_bias_window_s: 5.0
+
+device: cuda
+test_device: cuda

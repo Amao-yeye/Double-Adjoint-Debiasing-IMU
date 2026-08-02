@@ -1,0 +1,77 @@
+dataset: euroc
+train_supervision: gt
+trainval_gt_source: state_groundtruth_estimate0
+supervision_timing: source
+
+train_seqs:
+  - MH_01_easy
+  - MH_03_medium
+  - MH_05_difficult
+  - V1_02_medium
+val_seqs:
+  - V2_01_easy
+test_seqs:
+  - MH_02_easy
+  - MH_04_difficult
+  - V2_02_medium
+  - V1_03_difficult
+  - V1_01_easy
+
+cache_dir: results/debias_imu/cache/EUROC_train_global_median_y0_noV203
+test_cache_dir: results/debias_imu/cache/EUROC_test_gt
+outputdir: results/debias_imu/EUROC_conservative_residual_train_global_y0_fullrollout_v201_w64_mse_e61
+
+network_type_Gyro: bw_func_conservative_residual
+network_type_Acc: ba_func_conservative_residual
+gyro_loss: ad
+acc_loss: se23
+acc_loss_type: se23
+
+loss_window: 64
+batch_size: 128
+epoch: 61
+lr_Gyro: 0.0002
+lr_Acc: 0.0005
+weight_decay_Gyro: 0.000001
+weight_decay_Acc: 0.000001
+gyro_lr_step_size: 30
+acc_lr_step_size: 30
+gyro_lr_gamma: 0.5
+acc_lr_gamma: 0.5
+val_freq: 10
+save_freq: 10
+train_batch_strategy: random_sequence
+percent_for_val: 0.2
+
+acc_loss_rot_weight: 1.0
+acc_loss_vel_weight: 1.0
+acc_loss_pos_weight: 1.0
+gyro_bias_rate_regularization_weight: 1000000.0
+acc_bias_rate_regularization_weight: 1000000.0
+
+sg_window_bw: 101
+sg_order_bw: 3
+sg_window_ba: 31
+sg_order_ba: 3
+
+initial_bias_mode: train_global_median
+initial_bias_window_s: 5.0
+
+full_rollout_select: true
+full_rollout_select_gyro: true
+full_rollout_val_seqs:
+  - V2_01_easy
+full_rollout_selection_cache_dir: results/debias_imu/cache/EUROC_full_rollout_val_gt
+full_rollout_selection_device: cpu
+full_rollout_score_aoe_weight: 1.0
+full_rollout_score_vel_weight: 0.0
+full_rollout_score_pos_weight: 1.0
+full_rollout_score_aoe_scale: 3.4944
+full_rollout_score_vel_scale: 16.2950
+full_rollout_score_pos_scale: 678.0098
+
+device: cpu
+test_device: cpu
+use_best_val: true
+readable_val_metrics: true
+skip_plots: true

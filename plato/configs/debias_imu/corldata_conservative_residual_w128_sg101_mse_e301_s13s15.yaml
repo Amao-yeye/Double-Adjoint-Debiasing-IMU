@@ -1,0 +1,52 @@
+dataset: corldata
+supervision: gt
+loss_type: se23_gt_supervision
+input_mode: u
+trainval_supervision_source: mocap_noninterp
+
+data_root: results/debias_imu/corldata_IMU_aligned_gt_vo_ref_sparse_gt
+cache_dir: results/debias_imu/cache/corldata_conservative_residual_w128_sg101_mse_e301_s13s15
+outputdir: results/debias_imu/corldata_conservative_residual_w128_sg101_mse_e301_s13s15
+
+# Same core architecture as the EuRoC conservative residual run. Corldata keeps
+# the existing sparse-GT physical window and split so the change is isolated to
+# network structure.
+train_seqs: [S00, S01, S02, S03]
+test_seqs: [S13, S15]
+window_size: 128
+dt: 0.001
+batch_size: 128
+epoch: 301
+percent_for_val: 0.2
+train_batch_strategy: random_sequence
+
+network_type_Gyro: bw_func_conservative_residual
+network_type_Acc: ba_func_conservative_residual
+lr_Gyro: 0.0001
+lr_Acc: 0.0001
+weight_decay_Gyro: 0.000001
+weight_decay_Acc: 0.000001
+gyro_lr_step_size: 150
+acc_lr_step_size: 150
+gyro_lr_gamma: 0.5
+acc_lr_gamma: 0.5
+val_freq: 25
+save_freq: 50
+
+acc_loss_rot_weight: 1.0
+acc_loss_vel_weight: 1.0
+acc_loss_pos_weight: 1.0
+
+use_best_val: true
+readable_val_metrics: true
+
+sg_window_bw: 101
+sg_order_bw: 3
+sg_window_ba: 31
+sg_order_ba: 3
+
+initial_bias_mode: median_window
+initial_bias_window_s: 5.0
+
+device: cuda
+test_device: cuda

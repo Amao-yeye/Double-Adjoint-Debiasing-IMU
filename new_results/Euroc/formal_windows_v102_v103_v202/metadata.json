@@ -1,0 +1,28 @@
+{
+  "dataset": "Euroc",
+  "result_dir": "new_results/Euroc/formal_windows_v102_v103_v202/model_rollouts",
+  "sequences": [
+    "V1_02_medium",
+    "V1_03_difficult",
+    "V2_02_medium"
+  ],
+  "lengths": [
+    50,
+    100,
+    150,
+    200
+  ],
+  "methods": [
+    "raw",
+    "ours"
+  ],
+  "gravity": [
+    0.0,
+    0.0,
+    -9.81
+  ],
+  "window_definition": "L integration intervals at 200 Hz; each window has L+1 state timestamps.",
+  "sampling": "non-overlapping starts at 0, L, 2L, ...; trailing incomplete windows are dropped.",
+  "reported_mean": "mean over all sampled test windows and propagated state timestamps; the initialized first state is excluded from primary mean columns.",
+  "cache_note": "V1_02_medium was densified from 10 Hz GT/bias to 200 Hz IMU timestamps in test_cache_dense; orientation used Slerp and velocity/position/bias used linear interpolation."
+}

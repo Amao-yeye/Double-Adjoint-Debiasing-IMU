@@ -1,0 +1,54 @@
+dataset: euroc
+train_supervision: gt
+trainval_gt_root: results/debias_imu/Euroc_GT_at_VO_timestamps_dedup
+trainval_gt_source: state_groundtruth_estimate0
+supervision_timing: source
+exclude_train_seq:
+  - V2_03_difficult
+
+cache_dir: results/debias_imu/cache/EUROC_unified_no_udot_gt_vorate_dedup_src32_dense
+test_cache_dir: results/debias_imu/cache/EUROC_test_gt
+outputdir: results/debias_imu/EUROC_unified_no_udot_gt_vorate_dedup_src32_dense_mse_lowlr_e51
+
+# Conservative AD MSE stage for the unified no-u_dot architecture.  Keep the
+# zero-output constant-bias prior and allow only a small Acc mean update.
+network_type_Gyro: bw_func_net_no_udot
+network_type_Acc: ba_func_net_no_udot
+bw_model_path: results/debias_imu/checkpoints/unified_no_udot_zero_init/gyro_zero_output.pt
+ba_init_model_path: results/debias_imu/checkpoints/unified_no_udot_zero_init/acc_zero_output.pt
+skip_gyro_train: true
+gyro_loss: ad
+acc_loss: se23
+
+loss_window: 32
+batch_size: 128
+epoch: 51
+lr_Gyro: 0.005
+lr_Acc: 0.00001
+weight_decay_Gyro: 0.000001
+weight_decay_Acc: 0.000001
+gyro_lr_step_size: 150
+acc_lr_step_size: 50
+gyro_lr_gamma: 0.5
+acc_lr_gamma: 0.5
+val_freq: 10
+save_freq: 10
+train_batch_strategy: random_sequence
+percent_for_val: 0.2
+
+acc_loss_rot_weight: 1.0
+acc_loss_vel_weight: 1.0
+acc_loss_pos_weight: 1.0
+
+sg_window_bw: 101
+sg_order_bw: 3
+sg_window_ba: 31
+sg_order_ba: 3
+
+initial_bias_mode: median_window
+initial_bias_window_s: 5.0
+
+device: cuda
+test_device: cpu
+use_best_val: true
+readable_val_metrics: true

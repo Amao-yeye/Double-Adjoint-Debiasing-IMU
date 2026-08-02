@@ -26,6 +26,10 @@ GYRO_FBU_RESIDUAL_NAME = "bw_func_fbu_residual"
 ACC_FBU_RESIDUAL_NAME = "ba_func_fbu_residual"
 GYRO_SLOW_RESIDUAL_NAME = "bw_func_slow_residual"
 ACC_SLOW_RESIDUAL_NAME = "ba_func_slow_residual"
+GYRO_SLOW_RESIDUAL_TINY_NAME = "bw_func_slow_residual_tiny"
+ACC_SLOW_RESIDUAL_TINY_NAME = "ba_func_slow_residual_tiny"
+GYRO_CONSERVATIVE_RESIDUAL_NAME = "bw_func_conservative_residual"
+ACC_CONSERVATIVE_RESIDUAL_NAME = "ba_func_conservative_residual"
 GYRO_BASELINE_NO_UDOT_NAME = "bw_func_net_no_udot"
 ACC_BASELINE_NO_UDOT_NAME = "ba_func_net_no_udot"
 
@@ -117,6 +121,8 @@ class BaselineNoUDotGyroFuncNet(nn.Module):
             if isinstance(module, nn.Linear):
                 nn.init.normal_(module.weight, mean=0.0, std=1.0e-3)
                 nn.init.constant_(module.bias, 0.0)
+        nn.init.constant_(self.linear2.weight, 0.0)
+        nn.init.constant_(self.linear2.bias, 0.0)
 
     def forward(self, y, imu_meas, imu_meas_dot, R0):
         del imu_meas_dot, R0
@@ -153,6 +159,8 @@ class BaselineNoUDotAccFuncNet(nn.Module):
             if isinstance(module, nn.Linear):
                 nn.init.normal_(module.weight, mean=0.0, std=1.0e-3)
                 nn.init.constant_(module.bias, 0.0)
+        nn.init.constant_(self.linear2.weight, 0.0)
+        nn.init.constant_(self.linear2.bias, 0.0)
 
     def forward(self, y, imu_meas, imu_meas_dot, R0):
         del imu_meas_dot, R0
@@ -344,6 +352,64 @@ class SlowResidualAccFuncNet(_SlowResidualBiasFuncNet):
             bias_scale=1.0,
             hidden_dim=96,
             rate_bound=0.15,
+            use_acc_bias=True,
+        )
+
+
+class SlowResidualTinyGyroFuncNet(_SlowResidualBiasFuncNet):
+    def __init__(self):
+        super().__init__(
+            slice(4, 7),
+            bias_scale=0.1,
+            hidden_dim=64,
+            rate_bound=3.0e-4,
+            lambda_init=-20.0,
+            use_acc_bias=False,
+        )
+
+
+class SlowResidualTinyAccFuncNet(_SlowResidualBiasFuncNet):
+    def __init__(self):
+        super().__init__(
+            slice(13, 16),
+            bias_scale=1.0,
+            hidden_dim=64,
+            rate_bound=3.0e-3,
+            lambda_init=-20.0,
+            use_acc_bias=True,
+        )
+
+
+class ConservativeResidualGyroFuncNet(_SlowResidualBiasFuncNet):
+    """Shared PLATO conservative no-u_dot gyro-bias dynamics.
+
+    The model class is intentionally the same as the slow residual family, but
+    this named variant fixes a cross-dataset policy: constant bias is an exact
+    initialization, while a small bounded residual rate can still correct long
+    rollouts when pose supervision supports it.
+    """
+
+    def __init__(self):
+        super().__init__(
+            slice(4, 7),
+            bias_scale=0.1,
+            hidden_dim=96,
+            rate_bound=1.0e-2,
+            lambda_init=-20.0,
+            use_acc_bias=False,
+        )
+
+
+class ConservativeResidualAccFuncNet(_SlowResidualBiasFuncNet):
+    """Shared PLATO conservative no-u_dot accelerometer-bias dynamics."""
+
+    def __init__(self):
+        super().__init__(
+            slice(13, 16),
+            bias_scale=1.0,
+            hidden_dim=96,
+            rate_bound=5.0e-2,
+            lambda_init=-20.0,
             use_acc_bias=True,
         )
 
@@ -656,6 +722,10 @@ def bw_func_choose_with_m2(network_type: str, device: str, fallback: Callable):
         return FbuResidualGyroFuncNet().to(device)
     if network_type == GYRO_SLOW_RESIDUAL_NAME:
         return SlowResidualGyroFuncNet().to(device)
+    if network_type == GYRO_SLOW_RESIDUAL_TINY_NAME:
+        return SlowResidualTinyGyroFuncNet().to(device)
+    if network_type == GYRO_CONSERVATIVE_RESIDUAL_NAME:
+        return ConservativeResidualGyroFuncNet().to(device)
     return fallback(network_type, device=device)
 
 
@@ -674,4 +744,8 @@ def ba_func_choose_with_m2(network_type: str, device: str, fallback: Callable):
         return FbuResidualAccFuncNet().to(device)
     if network_type == ACC_SLOW_RESIDUAL_NAME:
         return SlowResidualAccFuncNet().to(device)
+    if network_type == ACC_SLOW_RESIDUAL_TINY_NAME:
+        return SlowResidualTinyAccFuncNet().to(device)
+    if network_type == ACC_CONSERVATIVE_RESIDUAL_NAME:
+        return ConservativeResidualAccFuncNet().to(device)
     return fallback(network_type, device=device)

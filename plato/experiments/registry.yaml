@@ -1,0 +1,203 @@
+# PLATO experiment registry.
+#
+# Keep this file short and operational. It is not a full lab notebook; it is
+# the current deletion/retention index for important generated artifacts.
+#
+# status values used here:
+#   current_best, baseline, paper_table, data_export, diagnostic, audit,
+#   negative, superseded, partial
+#
+# keep values:
+#   true        protected
+#   review      inspect before deletion
+#   false       disposable if docs already preserve the conclusion
+
+schema_version: 1
+last_updated: 2026-05-20
+
+entries:
+  - id: corldata_interval_nll_joint_best_s13s15
+    status: current_best
+    keep: true
+    path: results/debias_imu/corldata_sparse_endpoint_no_udot_w256_sg101_initmedian5_interval_nll_joint_lr1e5_from_covonly_continue/
+    config: plato/configs/debias_imu/corldata_sparse_endpoint_no_udot_w256_sg101_initmedian5_interval_nll_joint_lr1e5_from_covonly_continue.yaml
+    used_for:
+      - corldata pure-IMU current best on S13/S15
+      - learned bias source for later OpenVINS diagnostics
+    metrics:
+      S13: {aoe_deg: 7.166, ate_vel: 15.995, ate_pos_m: 181.865}
+      S15: {aoe_deg: 6.534, ate_vel: 18.101, ate_pos_m: 290.986}
+    notes: Current best corldata S13/S15 interval-NLL joint mean model.
+
+  - id: corldata_se23_e301_baseline_s13s15
+    status: baseline
+    keep: true
+    path: results/debias_imu/corldata_sparse_endpoint_no_udot_w128_sg101_initmedian5_e301_s13s15/
+    config: plato/configs/debias_imu/corldata_sparse_endpoint_no_udot_w128_sg101_initmedian5_e301_s13s15.yaml
+    used_for:
+      - Debiasing-style SE23/e301 baseline
+      - comparison against interval-NLL joint
+    metrics:
+      S13: {aoe_deg: 7.953, ate_vel: 18.339, ate_pos_m: 209.924}
+      S15: {aoe_deg: 7.237, ate_vel: 18.710, ate_pos_m: 293.826}
+
+  - id: corldata_interval_nll_joint_s20s23_onlytest
+    status: paper_table
+    keep: true
+    path: results/debias_imu/corldata_interval_nll_joint_best_onlytest_s20s21s22s23/
+    used_for:
+      - corldata pure-IMU S20-S23 testing-set extension
+      - S13/S15/S20/S21 and six-sequence tables
+    notes: Pair with S13/S15 current-best metrics for full corldata testing comparisons.
+
+  - id: corldata_se23_e301_s20s23_onlytest
+    status: baseline
+    keep: true
+    path: results/debias_imu/corldata_se23_e301_best_onlytest_s20s21s22s23/
+    used_for:
+      - Debiasing-style SE23/e301 S20-S23 baseline
+      - pure-IMU table baseline
+
+  - id: corldata_raw_debiasing_ours_openvins_final_s13s23
+    status: paper_table
+    keep: true
+    path: results/openvins_eval/corldata/natural/final_s13s23_raw_debiasing_ours_full_trajectory.md
+    related_paths:
+      - results/openvins_eval/corldata/natural/final_s13s23_raw_debiasing_ours_full_trajectory.csv
+      - results/openvins_eval/corldata/natural/final_s13s23_raw_debiasing_ours_full_trajectory.json
+    used_for:
+      - final corldata OpenVINS full-trajectory position/rotation table
+    metrics:
+      raw_mean: {position_rmse_m: 117.843, rotation_rmse_deg: 9.415}
+      debiasing_full_bias_mean: {position_rmse_m: 4775.125, rotation_rmse_deg: 70.648}
+      ours_mean: {position_rmse_m: 35.304, rotation_rmse_deg: 8.224}
+
+  - id: corldata_openvins_reentry_adaptive_s13s15
+    status: diagnostic
+    keep: true
+    path: results/openvins_eval/corldata/natural/gated_gyro_ref_duration_reentry_adaptive_gray_runs/
+    related_paths:
+      - results/openvins_eval/corldata/natural/gated_gyro_ref_reentry_adaptive_gray_first_light_common_horizon.md
+      - results/openvins_eval/corldata/natural/gated_gyro_ref_reentry_adaptive_gray_all_common_horizon.md
+    used_for:
+      - S13/S15 OpenVINS learned-IMU operational policy
+      - re-entry stabilization evidence
+
+  - id: corldata_openvins_fair_s20s23_dynamic
+    status: diagnostic
+    keep: true
+    path: results/openvins_eval/corldata/natural/fair_s20s23_selected_dynamic_summary.md
+    related_paths:
+      - results/openvins_eval/corldata/natural/fair_s20s23_selected_fixed_frame_rotation.md
+    used_for:
+      - fair dynamic-config OpenVINS comparison on S20-S23
+    notes: Keep with selected raw and learned run roots until superseded.
+
+  - id: corldata_imu_aligned_gt_1000hz
+    status: data_export
+    keep: true
+    path: results/debias_imu/corldata_IMU_aligned_gt_vo_ref_1000hz/
+    producer: plato/scripts/export_corldata_imu_aligned_gt_from_extrinsics.py
+    used_for:
+      - corldata IMU/body GT reference
+      - OpenVINS and pure-IMU evaluation
+
+  - id: corldata_sparse_gt_supervision_root
+    status: data_export
+    keep: true
+    path: results/debias_imu/corldata_IMU_aligned_gt_vo_ref_sparse_gt/
+    used_for:
+      - sparse endpoint / interval-NLL corldata training
+
+  - id: corldata_training_pseudogt_root
+    status: data_export
+    keep: true
+    path: results/debias_imu/corldata_training_pseudogt/
+    producer: plato/scripts/export_corldata_debias_body_pseudogt.py
+    used_for:
+      - VO-teacher corldata supervision ablations
+
+  - id: liasuw_training_candidates_200hz
+    status: data_export
+    keep: true
+    path: results/debias_imu/LIASuw_training_candidates_200hz/
+    producer: plato/scripts/export_liasuw_debias_body_gt.py
+    used_for:
+      - LIASuw Debias_IMU training/evaluation roots
+      - accepted and usable-candidate pseudo-GT body supervision
+
+  - id: liasuw_accepted_pseudogt_windows
+    status: data_export
+    keep: true
+    paths:
+      - results/pseudo_gt/LIASuw/0912s06_80/
+      - results/pseudo_gt/LIASuw/0912s07_30/
+      - results/pseudo_gt/LIASuw/0912s10_40/
+    used_for:
+      - user-confirmed LIASuw stereo-only pseudo-GT windows
+    notes: 0203/0205 candidates are useful but require explicit admission before training-set changes.
+
+  - id: corldata_testing_pseudogt_artifacts
+    status: data_export
+    keep: true
+    paths:
+      - results/pseudo_gt/corldata/S13/
+      - results/pseudo_gt/corldata/S15/
+      - results/pseudo_gt/corldata/S20/
+      - results/pseudo_gt/corldata/S21/
+      - results/pseudo_gt/corldata/S22/
+      - results/pseudo_gt/corldata/S23/
+      - results/pseudo_gt/corldata/light_segments/
+    used_for:
+      - testing-set evaluation under natural visual degradation
+      - light-on/light-off interval definitions
+    notes: Do not add S13+ to training unless the split is explicitly changed.
+
+  - id: euroc_gt_at_vo_timestamps_dedup
+    status: data_export
+    keep: true
+    path: results/debias_imu/Euroc_GT_at_VO_timestamps_dedup/
+    producer: plato/scripts/train_bias_dynamics/export_euroc_gt_at_reference_timestamps.py
+    used_for:
+      - EuRoC GT-at-VO-rate supervision experiments
+
+  - id: euroc_unified_no_udot_firstbias_corrective
+    status: diagnostic
+    keep: true
+    path: results/debias_imu/EUROC_unified_no_udot_gt_vorate_dedup_src32_dense_mse_lowlr_e51_test_firstbias/
+    used_for:
+      - corrective evidence that oracle 5s median init was not fair
+    metrics:
+      mean: {aoe_deg: 23.218, ate_vel: 141.311, ate_pos_m: 5917.102}
+
+  - id: euroc_oracle_checkpoint_audit
+    status: audit
+    keep: true
+    path: results/debias_imu/checkpoints/euroc_unified_no_udot_mse_lowlr_e51_oracle_audit/
+    used_for:
+      - audit trail for deleted oracle-initialized EuRoC run
+    notes: Do not report as a fair result.
+
+  - id: liasuw_phys_delta_framefixed_openvins_route
+    status: diagnostic
+    keep: review
+    path: results/debias_imu/LIASuw_phys_delta_vo_pseudogt_framefixed_e1800_w16pose_b64/
+    used_for:
+      - LIASuw clean-IMU/OpenVINS route diagnostics
+    notes: Keep until LIASuw self-initialized OpenVINS status is resolved.
+
+  - id: corldata_partial_fulltest_stopped
+    status: partial
+    keep: false
+    path: results/debias_imu/corldata_sparse_endpoint_no_udot_w256_interval_nll_joint_fulltest/
+    used_for: []
+    notes: Stopped by user request after partial outputs only; do not report as complete.
+
+  - id: openvins_old_moved_path_build_products
+    status: superseded
+    keep: false
+    paths:
+      - external/OpenVINS/build_old_moved_path/
+      - external/OpenVINS/devel_old_moved_path/
+      - external/OpenVINS/logs_old_moved_path/
+    notes: Deleted on 2026-05-20 after reference/path/build-product audit.

@@ -36,6 +36,7 @@ import torch  # noqa: E402
 import Interpolation  # noqa: E402
 import lie_algebra as Lie  # noqa: E402
 import learning as debias_learning  # noqa: E402
+from covariance import paper_invariant_error_matrices  # noqa: E402
 from dataset import BaseDataset, pdump, pload  # noqa: E402
 from learning import (  # noqa: E402
     Acc_train_SE23,
@@ -47,6 +48,7 @@ from learning import (  # noqa: E402
 from m2_bias_networks import (  # noqa: E402
     ACC_FBU_RESIDUAL_NAME,
     ACC_BASELINE_NO_UDOT_NAME,
+    ACC_CONSERVATIVE_RESIDUAL_NAME,
     ACC_M2_NAME,
     ACC_PHYS_DELTA_NAME,
     ACC_PHYS_EQ_NAME,
@@ -54,11 +56,14 @@ from m2_bias_networks import (  # noqa: E402
     ACC_SLOW_RESIDUAL_NAME,
     GYRO_FBU_RESIDUAL_NAME,
     GYRO_BASELINE_NO_UDOT_NAME,
+    GYRO_CONSERVATIVE_RESIDUAL_NAME,
     GYRO_M2_NAME,
     GYRO_PHYS_DELTA_NAME,
     GYRO_PHYS_EQ_NAME,
     GYRO_PHYS_RATE_NAME,
     GYRO_SLOW_RESIDUAL_NAME,
+    GYRO_SLOW_RESIDUAL_TINY_NAME,
+    ACC_SLOW_RESIDUAL_TINY_NAME,
     ba_func_choose_with_m2,
     bw_func_choose_with_m2,
 )
@@ -109,6 +114,10 @@ NO_DERIV_NETWORKS = {
     ACC_FBU_RESIDUAL_NAME,
     GYRO_SLOW_RESIDUAL_NAME,
     ACC_SLOW_RESIDUAL_NAME,
+    GYRO_SLOW_RESIDUAL_TINY_NAME,
+    ACC_SLOW_RESIDUAL_TINY_NAME,
+    GYRO_CONSERVATIVE_RESIDUAL_NAME,
+    ACC_CONSERVATIVE_RESIDUAL_NAME,
     GYRO_BASELINE_NO_UDOT_NAME,
     ACC_BASELINE_NO_UDOT_NAME,
 }
@@ -180,6 +189,35 @@ def _select_initial_bias(
     raise ValueError(f"Unsupported initial bias mode: {mode}")
 
 
+def _resolve_initial_bias(
+    bias: torch.Tensor,
+    t_bias: torch.Tensor,
+    mode: str,
+    window_s: float,
+    device: str,
+    fixed_bias: torch.Tensor | None = None,
+) -> torch.Tensor:
+    if fixed_bias is not None:
+        return fixed_bias.to(device=device, dtype=bias.dtype)
+    return _select_initial_bias(bias, t_bias, mode, window_s, device)
+
+
+def _apply_train_initial_bias_modes(
+    y0_batch: torch.Tensor,
+    train_initial_bw_mode: str = "label",
+    train_initial_ba_mode: str = "label",
+) -> torch.Tensor:
+    if train_initial_bw_mode not in {"label", "zero"}:
+        raise ValueError(f"Unsupported train initial gyro-bias mode: {train_initial_bw_mode}")
+    if train_initial_ba_mode not in {"label", "zero"}:
+        raise ValueError(f"Unsupported train initial accel-bias mode: {train_initial_ba_mode}")
+    if train_initial_bw_mode == "zero":
+        y0_batch[..., 4:7] = 0.0
+    if train_initial_ba_mode == "zero":
+        y0_batch[..., 13:16] = 0.0
+    return y0_batch
+
+
 def _weighted_se23_loss(
     X_pred: torch.Tensor,
     X_gt: torch.Tensor,
@@ -195,6 +233,15 @@ def _weighted_se23_loss(
     )
     denom = weights.sum().clamp_min(torch.finfo(xi.dtype).eps)
     return (xi.square() * weights).sum() / (xi.numel() / xi.shape[-1] * denom)
+
+
+def _bias_rate_regularization(solution: torch.Tensor, t_odeint: torch.Tensor, bias_slice: slice) -> torch.Tensor:
+    if solution.shape[0] < 2:
+        return torch.zeros((), dtype=solution.dtype, device=solution.device)
+    dt = (t_odeint[1:] - t_odeint[:-1]).to(dtype=solution.dtype, device=solution.device)
+    dt = dt.reshape((-1,) + (1,) * (solution.ndim - 1)).clamp_min(torch.finfo(solution.dtype).eps)
+    bias_rate = (solution[1:, ..., bias_slice] - solution[:-1, ..., bias_slice]) / dt
+    return bias_rate.square().mean()
 
 
 def _nll_optimize_q(args: argparse.Namespace) -> bool:
@@ -213,6 +260,16 @@ def _load_ba_model_initialization(ba_model: torch.nn.Module, checkpoint_path: st
     state = checkpoint.get("func_ba_model", checkpoint)
     ba_model.load_state_dict(state)
     print(f"Loaded Acc initialization from {checkpoint_path}", flush=True)
+
+
+def _load_bw_model_initialization(bw_model: torch.nn.Module, checkpoint_path: str | Path | None, device: str) -> None:
+    if checkpoint_path is None:
+        return
+    checkpoint_path = Path(checkpoint_path)
+    checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=True)
+    state = checkpoint.get("func_bw_model", checkpoint)
+    bw_model.load_state_dict(state)
+    print(f"Loaded Gyro initialization from {checkpoint_path}", flush=True)
 
 
 def _select_nll_supervision_states(
@@ -526,6 +583,9 @@ def _interval_preintegration_residual_nll(
     info = {
         "num_intervals": len(residual_chunks),
         "num_factors": flat_residual.shape[0],
+        "quad_mean": mahal.detach().mean(),
+        "logdet_mean": logdet.detach().mean(),
+        "min_chol_diag": torch.diagonal(chol, dim1=-2, dim2=-1).detach().amin(),
     }
     if debug_covariance_gradients:
         flat_D_g = D_g_full.reshape(-1, D_g_full.shape[-2], D_g_full.shape[-1])
@@ -557,15 +617,185 @@ def _interval_preintegration_residual_nll(
     return loss, info
 
 
-def _format_interval_residual_metrics(residual: torch.Tensor) -> str:
+def _select_trajectory_supervision_indices(
+    num_states: int,
+    mode: str,
+    stride: int,
+    max_states: int,
+    device: torch.device | str,
+) -> torch.Tensor:
+    if num_states < 2:
+        raise ValueError("Trajectory-state NLL requires at least two supervised states per window.")
+    if mode == "endpoint":
+        return torch.tensor([num_states - 1], dtype=torch.long, device=device)
+    if mode != "sparse":
+        raise ValueError(f"Unsupported trajectory supervision mode: {mode}")
+    if stride <= 0:
+        raise ValueError("--trajectory-supervision-stride must be positive.")
+
+    indices = list(range(1, num_states, int(stride)))
+    if indices[-1] != num_states - 1:
+        indices.append(num_states - 1)
+    if max_states > 0 and len(indices) > max_states:
+        positions = np.linspace(0, len(indices) - 1, int(max_states))
+        indices = [indices[int(round(pos))] for pos in positions]
+        deduped = []
+        for idx in indices:
+            if not deduped or idx != deduped[-1]:
+                deduped.append(idx)
+        indices = deduped
+        if indices[-1] != num_states - 1:
+            indices[-1] = num_states - 1
+    return torch.tensor(indices, dtype=torch.long, device=device)
+
+
+def _trajectory_state_residual_nll(
+    solution: torch.Tensor,
+    R_sol: torch.Tensor,
+    X_gt_batch: torch.Tensor,
+    t_odeint: torch.Tensor,
+    eval_indices: torch.Tensor,
+    noise_model: IntervalNoiseVariances,
+    gravity: torch.Tensor,
+    residual_mask: torch.Tensor | None,
+    target_cov_floor: float,
+    jitter: float,
+    detach_covariance_theta: bool,
+    supervision_mode: str,
+    supervision_stride: int,
+    max_supervised_states: int,
+    return_residuals: bool = False,
+) -> tuple[torch.Tensor, dict]:
+    """Trajectory-state NLL with a joint covariance over supervised timestamps.
+
+    Residual convention follows the existing SE23 loss:
+        xi_i = Log(inv(X_gt_i) @ X_pred_i)
+
+    The covariance is propagated from the window start and keeps cross-time
+    covariance blocks between all selected supervised states. The initial state
+    is omitted because the covariance is zero by construction.
+    """
+
+    dtype = solution.dtype
+    device = solution.device
+    if solution.shape[0] == X_gt_batch.shape[0]:
+        solution_eval = solution
+        R_eval = R_sol
+        supervision_indices = torch.arange(X_gt_batch.shape[0], dtype=torch.long, device=device)
+    else:
+        supervision_indices = eval_indices.to(device=device, dtype=torch.long)
+        solution_eval = solution[supervision_indices]
+        R_eval = R_sol[supervision_indices]
+
+    selected_gt_indices = _select_trajectory_supervision_indices(
+        X_gt_batch.shape[0],
+        supervision_mode,
+        supervision_stride,
+        max_supervised_states,
+        device,
+    )
+    selected_ode_indices = supervision_indices.index_select(0, selected_gt_indices)
+    selected_ode_indices_cpu = selected_ode_indices.detach().cpu().long().tolist()
+
+    X_pred_all = Lie.SEn3fromSO3Rn(R_eval, solution_eval[..., 7:13])
+    residual_full = Lie.SEn3log(Lie.SEn3inverse(X_gt_batch) @ X_pred_all).index_select(0, selected_gt_indices)
+
+    alpha_g, alpha_a = noise_model.variances()
+    alpha_g = alpha_g.to(dtype=dtype, device=device)
+    alpha_a = alpha_a.to(dtype=dtype, device=device)
+    noise_cov = torch.diag(torch.cat([alpha_a.repeat(3), alpha_g.repeat(3)])).to(dtype=dtype, device=device)
+
+    batch_shape = solution.shape[1:-1]
+    P = torch.zeros(batch_shape + (9, 9), dtype=dtype, device=device)
+    cross_to_selected = torch.empty((0,) + batch_shape + (9, 9), dtype=dtype, device=device)
+    lower_blocks: list[torch.Tensor] = []
+    diag_blocks: list[torch.Tensor] = []
+    gravity = gravity.to(dtype=dtype, device=device)
+
+    next_selected = 0
+    for imu_idx in range(solution.shape[0] - 1):
+        dt_k = (t_odeint[imu_idx + 1] - t_odeint[imu_idx]).to(dtype=dtype, device=device)
+        R_cov = R_sol[imu_idx]
+        v_cov = solution[imu_idx, ..., 7:10]
+        p_cov = solution[imu_idx, ..., 10:13]
+        if detach_covariance_theta:
+            R_cov = R_cov.detach()
+            v_cov = v_cov.detach()
+            p_cov = p_cov.detach()
+        F, G = paper_invariant_error_matrices(R_cov, v_cov, p_cov, dt_k, gravity=gravity)
+        Q = G @ noise_cov @ G.transpose(-1, -2)
+        if cross_to_selected.shape[0] > 0:
+            cross_to_selected = F.unsqueeze(0) @ cross_to_selected
+        P = F @ P @ F.transpose(-1, -2) + Q
+        P = 0.5 * (P + P.transpose(-1, -2))
+
+        if next_selected < len(selected_ode_indices_cpu) and imu_idx + 1 == selected_ode_indices_cpu[next_selected]:
+            lower_blocks.append(cross_to_selected.clone())
+            diag_blocks.append(P.clone())
+            cross_to_selected = torch.cat([cross_to_selected, P.unsqueeze(0)], dim=0)
+            next_selected += 1
+
+    if next_selected != len(selected_ode_indices_cpu):
+        raise ValueError(
+            "Failed to collect all trajectory-state covariance blocks: "
+            f"collected={next_selected}, expected={len(selected_ode_indices_cpu)}"
+        )
+
+    num_supervised = len(diag_blocks)
+    full_dim = 9 * num_supervised
+    Sigma = torch.zeros(batch_shape + (full_dim, full_dim), dtype=dtype, device=device)
+    for row in range(num_supervised):
+        row_slice = slice(9 * row, 9 * (row + 1))
+        Sigma[..., row_slice, row_slice] = diag_blocks[row]
+        for col in range(row):
+            col_slice = slice(9 * col, 9 * (col + 1))
+            block = lower_blocks[row][col]
+            Sigma[..., row_slice, col_slice] = block
+            Sigma[..., col_slice, row_slice] = block.transpose(-1, -2)
+
+    residual = residual_full
+    if residual_mask is not None:
+        idx = torch.nonzero(residual_mask.to(device=device), as_tuple=False).squeeze(-1)
+        residual = residual.index_select(-1, idx)
+        block_indices = torch.cat([idx + 9 * block for block in range(num_supervised)], dim=0)
+        Sigma = Sigma.index_select(-1, block_indices).index_select(-2, block_indices)
+
+    residual_dim = residual.shape[-1]
+    residual_batch = residual.permute(*range(1, residual.ndim - 1), 0, residual.ndim - 1).reshape(
+        batch_shape + (num_supervised * residual_dim,)
+    )
+    eye = torch.eye(Sigma.shape[-1], dtype=dtype, device=device)
+    Sigma = 0.5 * (Sigma + Sigma.transpose(-1, -2)) + (float(target_cov_floor) + float(jitter)) * eye
+
+    flat_residual = residual_batch.reshape(-1, residual_batch.shape[-1])
+    flat_Sigma = Sigma.reshape(-1, Sigma.shape[-2], Sigma.shape[-1])
+    chol = torch.linalg.cholesky(flat_Sigma)
+    solved = torch.cholesky_solve(flat_residual.unsqueeze(-1), chol).squeeze(-1)
+    mahal = (flat_residual * solved).sum(dim=-1)
+    logdet = 2.0 * torch.log(torch.diagonal(chol, dim1=-2, dim2=-1)).sum(dim=-1)
+    loss = 0.5 * (mahal + logdet).mean()
+
+    info = {
+        "num_supervised_states": num_supervised,
+        "num_factors": flat_residual.shape[0],
+        "quad_mean": mahal.detach().mean(),
+        "logdet_mean": logdet.detach().mean(),
+        "min_chol_diag": torch.diagonal(chol, dim1=-2, dim2=-1).detach().amin(),
+    }
+    if return_residuals:
+        info["residual"] = residual_full.detach()
+    return loss, info
+
+
+def _format_interval_residual_metrics(residual: torch.Tensor, prefix: str = "interval") -> str:
     flat = residual.reshape(-1, residual.shape[-1])
     rot_rmse = torch.sqrt(flat[:, :3].square().sum(dim=-1).mean()).item() * 180.0 / np.pi
     vel_rmse = torch.sqrt(flat[:, 3:6].square().sum(dim=-1).mean()).item() if flat.shape[-1] >= 6 else float("nan")
     pos_rmse = torch.sqrt(flat[:, 6:9].square().sum(dim=-1).mean()).item() if flat.shape[-1] >= 9 else float("nan")
     return (
-        f"val_interval_rot_rmse_deg={rot_rmse:.6g} "
-        f"val_interval_vel_rmse_mps={vel_rmse:.6g} "
-        f"val_interval_pos_rmse_m={pos_rmse:.6g}"
+        f"val_{prefix}_rot_rmse_deg={rot_rmse:.6g} "
+        f"val_{prefix}_vel_rmse_mps={vel_rmse:.6g} "
+        f"val_{prefix}_pos_rmse_m={pos_rmse:.6g}"
     )
 
 
@@ -629,6 +859,10 @@ def Gyro_train_with_readable_metrics(
     train_batch_strategy: str = "random_sequence",
     val_freq: int = 100,
     save_freq: int = 100,
+    bw_init_model_path: str | Path | None = None,
+    gyro_bias_rate_regularization_weight: float = 0.0,
+    train_initial_bw_mode: str = "label",
+    train_initial_ba_mode: str = "label",
 ):
     num_iterations = epoch
     torch.manual_seed(3407)
@@ -640,6 +874,7 @@ def Gyro_train_with_readable_metrics(
     log_writer_path = os.path.join(outpur_dir, "Gyro_logs")
 
     bw_func = bw_func_choose(bw_func_name, device)
+    _load_bw_model_initialization(bw_func, bw_init_model_path, device)
     model = debias_learning.VFSE23vbiasBase(biasfunc_w=bw_func, device=device)
     best_loss = float("inf")
     writter = debias_learning.SummaryWriter(log_writer_path)
@@ -657,6 +892,18 @@ def Gyro_train_with_readable_metrics(
     optimizer = torch.optim.Adam(filter(lambda p: p.requires_grad, model.parameters()), lr=lr, weight_decay=weight_decay)
     scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=lr_step_size, gamma=lr_gamma)
     loss_total = float("nan")
+    torch.save(
+        {
+            "func_bw_model": model.biasfunc_w.state_dict(),
+            "VF_model": model.state_dict(),
+            "optimizer": optimizer.state_dict(),
+            "scheduler": scheduler.state_dict(),
+            "epoch": -1,
+            "valloss": loss_total,
+            "checkpoint_type": "initial",
+        },
+        model_save_path + "/model_initial.pt",
+    )
     for epoch_idx in range(num_iterations):
         epoch_start = debias_learning.start_epoch_profile(device)
         optimizer.zero_grad()
@@ -669,15 +916,27 @@ def Gyro_train_with_readable_metrics(
                 index, device, mask_flag=mask_flag, batch_size=batch_size
             )
             y0_batch, R0_batch = dataset_train.construct_init_forodeint(t_gt_batch, X_gt_batch, bwa_gt_batch)
+            y0_batch = _apply_train_initial_bias_modes(
+                y0_batch,
+                train_initial_bw_mode,
+                train_initial_ba_mode,
+            )
             spline = Interpolation.CubicHermiteSpline(spline_time, coeff, device=device)
             _set_model_imu_functions(model, spline, dataset_train.dt, use_delta_imu)
             model.set_R0(R0_batch)
-            _, R_sol = debias_learning.odeint_SO3(
+            solution, R_sol = debias_learning.odeint_SO3(
                 model, y0_batch, R0_batch, t_odeint, rtol=1e-7, atol=1e-9, method=integral_method
             )
             if R_sol.shape[0] != X_gt_batch.shape[0]:
                 R_sol = R_sol[eval_indices]
-            train_losses.append(1e6 * criterion(R_sol, X_gt_batch[..., :3, :3]))
+            loss = 1e6 * criterion(R_sol, X_gt_batch[..., :3, :3])
+            if gyro_bias_rate_regularization_weight > 0:
+                loss = loss + float(gyro_bias_rate_regularization_weight) * _bias_rate_regularization(
+                    solution,
+                    t_odeint,
+                    slice(4, 7),
+                )
+            train_losses.append(loss)
             batch_sizes.append(batch_size)
 
         train_loss = debias_learning.combine_train_losses(train_losses, batch_sizes)
@@ -697,6 +956,11 @@ def Gyro_train_with_readable_metrics(
                         index, device, mask_flag=mask_flag
                     )
                     y0_batch, R0_batch = dataset_train.construct_init_forodeint(t_gt_batch, X_gt_batch, bwa_gt_batch)
+                    y0_batch = _apply_train_initial_bias_modes(
+                        y0_batch,
+                        train_initial_bw_mode,
+                        train_initial_ba_mode,
+                    )
                     spline = Interpolation.CubicHermiteSpline(spline_time, coeff, device=device)
                     _set_model_imu_functions(model, spline, dataset_val.dt, use_delta_imu)
                     model.set_R0(R0_batch)
@@ -765,6 +1029,9 @@ def Acc_train_SE23_with_readable_metrics(
     acc_loss_vel_weight: float = 1.0,
     acc_loss_pos_weight: float = 1.0,
     ba_init_model_path: str | Path | None = None,
+    acc_bias_rate_regularization_weight: float = 0.0,
+    train_initial_bw_mode: str = "label",
+    train_initial_ba_mode: str = "label",
 ):
     num_iterations = epoch
     torch.manual_seed(3407)
@@ -792,6 +1059,17 @@ def Acc_train_SE23_with_readable_metrics(
     optimizer = torch.optim.Adam(filter(lambda p: p.requires_grad, model.parameters()), lr=lr, weight_decay=weight_decay)
     scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=lr_step_size, gamma=lr_gamma)
     loss_total = float("nan")
+    torch.save(
+        {
+            "func_ba_model": model.biasfunc_a.state_dict(),
+            "optimizer": optimizer.state_dict(),
+            "scheduler": scheduler.state_dict(),
+            "epoch": -1,
+            "valloss": loss_total,
+            "checkpoint_type": "initial",
+        },
+        model_save_path + "/model_initial.pt",
+    )
     for epoch_idx in range(num_iterations):
         epoch_start = debias_learning.start_epoch_profile(device)
         optimizer.zero_grad()
@@ -804,14 +1082,20 @@ def Acc_train_SE23_with_readable_metrics(
                 index, device, mask_flag=mask_flag, batch_size=batch_size
             )
             y0_batch, R0_batch = dataset_train.construct_init_forodeint(t_gt_batch, X_gt_batch, bwa_gt_batch)
+            y0_batch = _apply_train_initial_bias_modes(
+                y0_batch,
+                train_initial_bw_mode,
+                train_initial_ba_mode,
+            )
             spline = Interpolation.CubicHermiteSpline(spline_time, coeff, device=device)
             _set_model_imu_functions(model, spline, dataset_train.dt, use_delta_imu)
             model.set_R0(R0_batch)
             solution, R_sol = debias_learning.odeint_SO3(model, y0_batch, R0_batch, t_odeint, method=integral_method)
+            solution_full = solution
             solution, R_sol = debias_learning.select_supervision_states(solution, R_sol, X_gt_batch, eval_indices)
 
             X_pred = Lie.SEn3fromSO3Rn(R_sol, solution[..., 7:13])
-            train_losses.append(
+            loss = (
                 1e6
                 * _weighted_se23_loss(
                     X_pred,
@@ -821,6 +1105,13 @@ def Acc_train_SE23_with_readable_metrics(
                     acc_loss_pos_weight,
                 )
             )
+            if acc_bias_rate_regularization_weight > 0:
+                loss = loss + float(acc_bias_rate_regularization_weight) * _bias_rate_regularization(
+                    solution_full,
+                    t_odeint,
+                    slice(13, 16),
+                )
+            train_losses.append(loss)
             batch_sizes.append(batch_size)
 
         train_loss = debias_learning.combine_train_losses(train_losses, batch_sizes)
@@ -840,6 +1131,11 @@ def Acc_train_SE23_with_readable_metrics(
                         index, device, mask_flag=mask_flag
                     )
                     y0_batch, R0_batch = dataset_train.construct_init_forodeint(t_gt_batch, X_gt_batch, bwa_gt_batch)
+                    y0_batch = _apply_train_initial_bias_modes(
+                        y0_batch,
+                        train_initial_bw_mode,
+                        train_initial_ba_mode,
+                    )
                     spline = Interpolation.CubicHermiteSpline(spline_time, coeff, device=device)
                     _set_model_imu_functions(model, spline, dataset_val.dt, use_delta_imu)
                     model.set_R0(R0_batch)
@@ -926,6 +1222,8 @@ def Acc_train_SE23_NLL_with_readable_metrics(
     nll_train_gyro: bool = False,
     nll_mean_anchor_weight: float = 0.0,
     nll_mean_anchor_mode: str = "endpoint",
+    train_initial_bw_mode: str = "label",
+    train_initial_ba_mode: str = "label",
 ):
     """Acc training with per-state SE_2(3) Gaussian NLL and covariance propagation."""
     num_iterations = epoch
@@ -1024,6 +1322,11 @@ def Acc_train_SE23_NLL_with_readable_metrics(
                 index, device, mask_flag=mask_flag, batch_size=batch_size
             )
             y0_batch, R0_batch = dataset_train.construct_init_forodeint(t_gt_batch, X_gt_batch, bwa_gt_batch)
+            y0_batch = _apply_train_initial_bias_modes(
+                y0_batch,
+                train_initial_bw_mode,
+                train_initial_ba_mode,
+            )
             y0_aug = debias_learning.augment_state_with_covariance(y0_batch)
             spline = Interpolation.CubicHermiteSpline(spline_time, coeff, device=device)
             _set_model_imu_functions(joint_model, spline, dataset_train.dt, use_delta_imu)
@@ -1128,6 +1431,11 @@ def Acc_train_SE23_NLL_with_readable_metrics(
                         index, device, mask_flag=mask_flag
                     )
                     y0_batch, R0_batch = dataset_train.construct_init_forodeint(t_gt_batch, X_gt_batch, bwa_gt_batch)
+                    y0_batch = _apply_train_initial_bias_modes(
+                        y0_batch,
+                        train_initial_bw_mode,
+                        train_initial_ba_mode,
+                    )
                     y0_aug = debias_learning.augment_state_with_covariance(y0_batch)
                     spline = Interpolation.CubicHermiteSpline(spline_time, coeff, device=device)
                     _set_model_imu_functions(joint_model, spline, dataset_val.dt, use_delta_imu)
@@ -1313,11 +1621,18 @@ def Acc_train_interval_preintegration_NLL_with_readable_metrics(
     interval_debug_covariance_gradients: bool = False,
     interval_noise_init_model_path: str | Path | None = None,
     nll_train_gyro: bool = False,
+    nll_family: str = "interval",
+    trajectory_supervision_mode: str = "sparse",
+    trajectory_supervision_stride: int = 1,
+    trajectory_max_supervised_states: int = 0,
+    train_initial_bw_mode: str = "label",
+    train_initial_ba_mode: str = "label",
 ):
-    """Acc training with interval-level preintegration-factor NLL.
+    """Acc training with preintegration NLL variants.
 
-    This loss is not the older per-state trajectory NLL. Each likelihood term is
-    built from one low-rate supervision interval and has its own reset covariance.
+    nll_family="interval" keeps the previous independent interval-factor loss.
+    nll_family="trajectory_state" builds one stacked trajectory residual per
+    window and a joint covariance over all selected supervised timestamps.
     """
 
     if interval_nll_mode == "mse_only":
@@ -1342,11 +1657,17 @@ def Acc_train_interval_preintegration_NLL_with_readable_metrics(
             acc_loss_vel_weight=acc_loss_vel_weight,
             acc_loss_pos_weight=acc_loss_pos_weight,
             ba_init_model_path=ba_init_model_path,
+            train_initial_bw_mode=train_initial_bw_mode,
+            train_initial_ba_mode=train_initial_ba_mode,
         )
+    if nll_family not in {"interval", "trajectory_state"}:
+        raise ValueError(f"Unsupported nll_family: {nll_family}")
     if interval_nll_mode not in {"nll_cov_only", "nll_joint"}:
         raise ValueError(f"Unsupported interval_nll_mode: {interval_nll_mode}")
     if interval_covariance_gradient_mode not in {"analytic_sensitivity", "ad"}:
         raise ValueError(f"Unsupported interval_covariance_gradient_mode: {interval_covariance_gradient_mode}")
+    if nll_family == "trajectory_state" and interval_covariance_gradient_mode != "analytic_sensitivity":
+        raise ValueError("Trajectory-state NLL currently uses scalar-noise AD and does not support interval covariance modes.")
 
     num_iterations = epoch
     torch.manual_seed(3407)
@@ -1433,26 +1754,49 @@ def Acc_train_interval_preintegration_NLL_with_readable_metrics(
                 index, device, mask_flag=mask_flag, batch_size=batch_size
             )
             y0_batch, R0_batch = dataset_train.construct_init_forodeint(t_gt_batch, X_gt_batch, bwa_gt_batch)
+            y0_batch = _apply_train_initial_bias_modes(
+                y0_batch,
+                train_initial_bw_mode,
+                train_initial_ba_mode,
+            )
             spline = Interpolation.CubicHermiteSpline(spline_time, coeff, device=device)
             _set_model_imu_functions(model, spline, dataset_train.dt, use_delta_imu)
             model.set_R0(R0_batch)
             solution, R_sol = debias_learning.odeint_SO3(model, y0_batch, R0_batch, t_odeint, method=integral_method)
-            loss, _ = _interval_preintegration_residual_nll(
-                solution,
-                R_sol,
-                X_gt_batch,
-                t_gt_batch,
-                t_odeint,
-                eval_indices,
-                noise_model,
-                gravity,
-                residual_mask,
-                interval_target_cov_floor,
-                interval_jitter,
-                interval_detach_covariance_theta,
-                interval_covariance_gradient_mode,
-                False,
-            )
+            if nll_family == "trajectory_state":
+                loss, _ = _trajectory_state_residual_nll(
+                    solution,
+                    R_sol,
+                    X_gt_batch,
+                    t_odeint,
+                    eval_indices,
+                    noise_model,
+                    gravity,
+                    residual_mask,
+                    interval_target_cov_floor,
+                    interval_jitter,
+                    interval_detach_covariance_theta,
+                    trajectory_supervision_mode,
+                    trajectory_supervision_stride,
+                    trajectory_max_supervised_states,
+                )
+            else:
+                loss, _ = _interval_preintegration_residual_nll(
+                    solution,
+                    R_sol,
+                    X_gt_batch,
+                    t_gt_batch,
+                    t_odeint,
+                    eval_indices,
+                    noise_model,
+                    gravity,
+                    residual_mask,
+                    interval_target_cov_floor,
+                    interval_jitter,
+                    interval_detach_covariance_theta,
+                    interval_covariance_gradient_mode,
+                    False,
+                )
             loss, _ = add_prior(loss)
             train_losses.append(loss)
             batch_sizes.append(batch_size)
@@ -1480,6 +1824,10 @@ def Acc_train_interval_preintegration_NLL_with_readable_metrics(
                 nll_loss_total = 0.0
                 prior_loss_total = 0.0
                 interval_factors = 0
+                supervised_states = 0
+                quad_total = 0.0
+                logdet_total = 0.0
+                min_chol_diag = float("inf")
                 residual_chunks = []
                 debug_grad_totals = {
                     "grad_alpha_g_closed": 0.0,
@@ -1492,32 +1840,63 @@ def Acc_train_interval_preintegration_NLL_with_readable_metrics(
                         index, device, mask_flag=mask_flag
                     )
                     y0_batch, R0_batch = dataset_train.construct_init_forodeint(t_gt_batch, X_gt_batch, bwa_gt_batch)
+                    y0_batch = _apply_train_initial_bias_modes(
+                        y0_batch,
+                        train_initial_bw_mode,
+                        train_initial_ba_mode,
+                    )
                     spline = Interpolation.CubicHermiteSpline(spline_time, coeff, device=device)
                     _set_model_imu_functions(model, spline, dataset_val.dt, use_delta_imu)
                     model.set_R0(R0_batch)
                     solution, R_sol = debias_learning.odeint_SO3(model, y0_batch, R0_batch, t_odeint, method=integral_method)
-                    nll_loss, info = _interval_preintegration_residual_nll(
-                        solution,
-                        R_sol,
-                        X_gt_batch,
-                        t_gt_batch,
-                        t_odeint,
-                        eval_indices,
-                        noise_model,
-                        gravity,
-                        residual_mask,
-                        interval_target_cov_floor,
-                        interval_jitter,
-                        interval_detach_covariance_theta,
-                        interval_covariance_gradient_mode,
-                        interval_debug_covariance_gradients,
-                        return_residuals=True,
-                    )
+                    if nll_family == "trajectory_state":
+                        nll_loss, info = _trajectory_state_residual_nll(
+                            solution,
+                            R_sol,
+                            X_gt_batch,
+                            t_odeint,
+                            eval_indices,
+                            noise_model,
+                            gravity,
+                            residual_mask,
+                            interval_target_cov_floor,
+                            interval_jitter,
+                            interval_detach_covariance_theta,
+                            trajectory_supervision_mode,
+                            trajectory_supervision_stride,
+                            trajectory_max_supervised_states,
+                            return_residuals=True,
+                        )
+                    else:
+                        nll_loss, info = _interval_preintegration_residual_nll(
+                            solution,
+                            R_sol,
+                            X_gt_batch,
+                            t_gt_batch,
+                            t_odeint,
+                            eval_indices,
+                            noise_model,
+                            gravity,
+                            residual_mask,
+                            interval_target_cov_floor,
+                            interval_jitter,
+                            interval_detach_covariance_theta,
+                            interval_covariance_gradient_mode,
+                            interval_debug_covariance_gradients,
+                            return_residuals=True,
+                        )
                     loss, prior = add_prior(nll_loss)
                     loss_total += loss.item()
                     nll_loss_total += nll_loss.item()
                     prior_loss_total += prior.item()
                     interval_factors += int(info["num_factors"])
+                    supervised_states += int(info.get("num_supervised_states", info.get("num_intervals", 0)))
+                    if "quad_mean" in info:
+                        quad_total += float(info["quad_mean"].item()) * int(info["num_factors"])
+                    if "logdet_mean" in info:
+                        logdet_total += float(info["logdet_mean"].item()) * int(info["num_factors"])
+                    if "min_chol_diag" in info:
+                        min_chol_diag = min(min_chol_diag, float(info["min_chol_diag"].item()))
                     residual_chunks.append(info["residual"])
                     if interval_debug_covariance_gradients:
                         for name in debug_grad_totals:
@@ -1526,6 +1905,17 @@ def Acc_train_interval_preintegration_NLL_with_readable_metrics(
                 writter.add_scalar("val_loss", loss_total, epoch_idx)
                 sigma_g, sigma_a = noise_model.sigmas()
                 residual_val = torch.cat([chunk.reshape(-1, chunk.shape[-1]) for chunk in residual_chunks], dim=0)
+                quad_mean_text = ""
+                if interval_factors > 0 and (quad_total != 0.0 or logdet_total != 0.0):
+                    quad_mean = quad_total / interval_factors
+                    logdet_mean = logdet_total / interval_factors
+                    writter.add_scalar("val_nll_quad_mean", quad_mean, epoch_idx)
+                    writter.add_scalar("val_nll_logdet_mean", logdet_mean, epoch_idx)
+                    quad_mean_text = f"val_quad_mean={quad_mean:.6g} val_logdet_mean={logdet_mean:.6g} "
+                min_chol_text = ""
+                if np.isfinite(min_chol_diag):
+                    writter.add_scalar("val_min_chol_diag", min_chol_diag, epoch_idx)
+                    min_chol_text = f"val_min_chol_diag={min_chol_diag:.6g} "
                 debug_grad_text = ""
                 if interval_debug_covariance_gradients and residual_chunks:
                     for name, value in debug_grad_totals.items():
@@ -1537,14 +1927,17 @@ def Acc_train_interval_preintegration_NLL_with_readable_metrics(
                         f"grad_raw_sigma_a2_closed={debug_grad_totals['grad_raw_sigma_a2_closed']:.6g} "
                     )
                 print(
-                    f"stage=AccIntervalNLL epoch={epoch_idx} train_loss={train_loss.item():.6g} "
-                    f"val_loss={loss_total:.6g} mode={interval_nll_mode} train_gyro={nll_train_gyro} "
+                    f"stage={'AccTrajectoryStateNLL' if nll_family == 'trajectory_state' else 'AccIntervalNLL'} "
+                    f"epoch={epoch_idx} train_loss={train_loss.item():.6g} "
+                    f"val_loss={loss_total:.6g} family={nll_family} mode={interval_nll_mode} train_gyro={nll_train_gyro} "
                     f"sigma_a={sigma_a.item():.8g} sigma_g={sigma_g.item():.8g} "
-                    f"val_interval_nll={nll_loss_total:.6g} val_prior={prior_loss_total:.6g} "
-                    f"val_factors={interval_factors} detach_cov_theta={interval_detach_covariance_theta} "
+                    f"val_preintegration_nll={nll_loss_total:.6g} val_prior={prior_loss_total:.6g} "
+                    f"val_factors={interval_factors} val_supervised_states={supervised_states} "
+                    f"{quad_mean_text}{min_chol_text}"
+                    f"detach_cov_theta={interval_detach_covariance_theta} "
                     f"cov_grad_mode={interval_covariance_gradient_mode} "
                     f"{debug_grad_text}"
-                    f"{_format_interval_residual_metrics(residual_val)}",
+                    f"{_format_interval_residual_metrics(residual_val, 'trajectory' if nll_family == 'trajectory_state' else 'interval')}",
                     flush=True,
                 )
 
@@ -1568,6 +1961,10 @@ def Acc_train_interval_preintegration_NLL_with_readable_metrics(
                     "interval_covariance_gradient_mode": interval_covariance_gradient_mode,
                     "interval_debug_covariance_gradients": interval_debug_covariance_gradients,
                     "nll_train_gyro": nll_train_gyro,
+                    "nll_family": nll_family,
+                    "trajectory_supervision_mode": trajectory_supervision_mode,
+                    "trajectory_supervision_stride": trajectory_supervision_stride,
+                    "trajectory_max_supervised_states": trajectory_max_supervised_states,
                 }
                 if nll_train_gyro and interval_nll_mode == "nll_joint":
                     best_checkpoint["func_bw_model"] = model.biasfunc_w.state_dict()
@@ -1607,6 +2004,10 @@ def Acc_train_interval_preintegration_NLL_with_readable_metrics(
                 "interval_covariance_gradient_mode": interval_covariance_gradient_mode,
                 "interval_debug_covariance_gradients": interval_debug_covariance_gradients,
                 "nll_train_gyro": nll_train_gyro,
+                "nll_family": nll_family,
+                "trajectory_supervision_mode": trajectory_supervision_mode,
+                "trajectory_supervision_stride": trajectory_supervision_stride,
+                "trajectory_max_supervised_states": trajectory_max_supervised_states,
             }
             if nll_train_gyro and interval_nll_mode == "nll_joint":
                 epoch_checkpoint["func_bw_model"] = model.biasfunc_w.state_dict()
@@ -1665,6 +2066,8 @@ def _calculate_constant_bias(
     path: Path,
     initial_bias_mode: str = "first",
     initial_bias_window_s: float = 1.0,
+    fixed_bw0: torch.Tensor | None = None,
+    fixed_ba0: torch.Tensor | None = None,
 ) -> None:
     if path.exists():
         return
@@ -1675,8 +2078,22 @@ def _calculate_constant_bias(
     u_imu = u_imu.to(device)
     X_gt = X_gt.to(device)
     t_gt = t_gt.to(device)
-    bw_const = _select_initial_bias(bias_w_gt, t_w_bias, initial_bias_mode, initial_bias_window_s, device)
-    ba_const = _select_initial_bias(bias_a_gt, t_a_bias, initial_bias_mode, initial_bias_window_s, device)
+    bw_const = _resolve_initial_bias(
+        bias_w_gt,
+        t_w_bias,
+        initial_bias_mode,
+        initial_bias_window_s,
+        device,
+        fixed_bias=fixed_bw0,
+    )
+    ba_const = _resolve_initial_bias(
+        bias_a_gt,
+        t_a_bias,
+        initial_bias_mode,
+        initial_bias_window_s,
+        device,
+        fixed_bias=fixed_ba0,
+    )
     X_const = torch.zeros_like(X_gt)
     X_const[0] = X_gt[0]
     g_const = torch.tensor([0, 0, -9.81], dtype=X_gt.dtype, device=device)
@@ -1710,6 +2127,8 @@ def Test_with_configured_aux(
     use_delta_imu: bool = False,
     initial_bias_mode: str = "first",
     initial_bias_window_s: float = 1.0,
+    fixed_bw0: torch.Tensor | None = None,
+    fixed_ba0: torch.Tensor | None = None,
 ) -> None:
     model = debias_learning.VFSE23vbiasBase(biasfunc_w=bw_model, biasfunc_a=ba_model, device=device)
     model.set_bw_zero(False)
@@ -1731,8 +2150,22 @@ def Test_with_configured_aux(
         R0 = X_gt[0, :3, :3].clone()
         bias_w_gt, t_w_bias = dataset_test.get_w_bias(index)
         bias_a_gt, t_a_bias = dataset_test.get_a_bias(index)
-        bw0 = _select_initial_bias(bias_w_gt, t_w_bias, initial_bias_mode, initial_bias_window_s, device)
-        ba0 = _select_initial_bias(bias_a_gt, t_a_bias, initial_bias_mode, initial_bias_window_s, device)
+        bw0 = _resolve_initial_bias(
+            bias_w_gt,
+            t_w_bias,
+            initial_bias_mode,
+            initial_bias_window_s,
+            device,
+            fixed_bias=fixed_bw0,
+        )
+        ba0 = _resolve_initial_bias(
+            bias_a_gt,
+            t_a_bias,
+            initial_bias_mode,
+            initial_bias_window_s,
+            device,
+            fixed_bias=fixed_ba0,
+        )
         vec3zeros = torch.zeros(3, dtype=X_gt.dtype, device=device)
         y0 = torch.cat([vec3zeros, t_gt[0].unsqueeze(-1), bw0, X_gt[0, :3, 3], X_gt[0, :3, 4], ba0], dim=-1).unsqueeze(0)
 
@@ -1755,6 +2188,7 @@ def Test_with_configured_aux(
                 "initial_bias_window_s": float(initial_bias_window_s),
                 "bw0": bw0.cpu(),
                 "ba0": ba0.cpu(),
+                "fixed_initial_bias": fixed_bw0 is not None or fixed_ba0 is not None,
             },
             str(path_tmp),
         )
@@ -1773,6 +2207,8 @@ def Test_with_configured_aux(
             const_path,
             initial_bias_mode=initial_bias_mode,
             initial_bias_window_s=initial_bias_window_s,
+            fixed_bw0=fixed_bw0,
+            fixed_ba0=fixed_ba0,
         )
 
 
@@ -1809,6 +2245,8 @@ class LIASuwDebiasDataset(BaseDataset):
         vo_gap_tolerance_s: float = 0.015,
         gravity_calibration_json: str | Path | None = None,
         gravity_accel_world: tuple[float, float, float] = DEFAULT_GRAVITY_ACCEL_WORLD,
+        source_position_sg_window: int = 0,
+        source_position_sg_order: int = 3,
         recompute: bool = False,
     ):
         super().__init__(
@@ -1832,6 +2270,12 @@ class LIASuwDebiasDataset(BaseDataset):
         self._vo_supervision_world_frame = vo_supervision_world_frame
         self._vo_gap_tolerance_s = vo_gap_tolerance_s
         self._gravity_default_accel_world = np.asarray(gravity_accel_world, dtype=np.float64)
+        self._source_position_sg_window = int(source_position_sg_window)
+        self._source_position_sg_order = int(source_position_sg_order)
+        if self._source_position_sg_window < 0:
+            raise ValueError("source_position_sg_window must be non-negative.")
+        if self._source_position_sg_order < 0:
+            raise ValueError("source_position_sg_order must be non-negative.")
         if self._gravity_default_accel_world.shape != (3,):
             raise ValueError(f"gravity_accel_world must have shape (3,), got {self._gravity_default_accel_world.shape}")
         self._gravity_calibration_path = Path(gravity_calibration_json) if gravity_calibration_json else None
@@ -1910,6 +2354,55 @@ class LIASuwDebiasDataset(BaseDataset):
             "gravity_accel_world_m_s2": [round(float(x), 12) for x in gravity],
         }
 
+    def _source_derivative_cache_key(self) -> dict | None:
+        if self._source_position_sg_window <= 0:
+            return None
+        return {
+            "method": "savgol_position_derivative",
+            "window": int(self._source_position_sg_window),
+            "order": int(self._source_position_sg_order),
+        }
+
+    def _effective_source_sg_window(self, num_samples: int) -> int | None:
+        if self._source_position_sg_window <= 0:
+            return None
+        max_window = int(num_samples) if int(num_samples) % 2 == 1 else int(num_samples) - 1
+        min_window = int(self._source_position_sg_order) + 2
+        if min_window % 2 == 0:
+            min_window += 1
+        window = int(self._source_position_sg_window)
+        if window % 2 == 0:
+            window += 1
+        window = min(window, max_window)
+        if window < min_window:
+            return None
+        return window
+
+    def _source_position_derivatives(
+        self,
+        p_gt: np.ndarray,
+        t_gt: np.ndarray,
+        source_dt: float,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        window = self._effective_source_sg_window(p_gt.shape[0])
+        if window is None:
+            v_gt = np.gradient(p_gt, t_gt, axis=0, edge_order=2)
+            a_world = np.gradient(v_gt, t_gt, axis=0, edge_order=2)
+            return v_gt, a_world
+        v_gt = self.apply_sg_smoother(
+            p_gt,
+            window,
+            self._source_position_sg_order,
+            deriv=1,
+        ) / source_dt
+        a_world = self.apply_sg_smoother(
+            p_gt,
+            window,
+            self._source_position_sg_order,
+            deriv=2,
+        ) / (source_dt * source_dt)
+        return v_gt, a_world
+
     def _gravity_alignment_matrix(self, sequence: str) -> np.ndarray:
         source = self._gravity_accel_world(sequence)
         target = np.asarray(DEFAULT_GRAVITY_ACCEL_WORLD, dtype=np.float64)
@@ -1975,6 +2468,11 @@ class LIASuwDebiasDataset(BaseDataset):
                 pass
             elif actual_gravity != expected_gravity:
                 return False
+            if expected in {MOCAP_NONINTERP_SUPERVISION, VO_IMU_NONINTERP_SUPERVISION}:
+                expected_derivative = self._source_derivative_cache_key()
+                actual_derivative = imudict.get("source_derivative_filter")
+                if actual_derivative != expected_derivative:
+                    return False
             expected_quality = self._quality_cache_key(data_dir, sequence)
             actual_quality = imudict.get("quality_window_filter")
             if expected_quality is None:
@@ -2100,8 +2598,8 @@ class LIASuwDebiasDataset(BaseDataset):
         q_gt = q_gt / q_gt.norm(dim=1, keepdim=True)
         rot_gt = Lie.quat_to_SO3(q_gt).cpu()
 
-        v_gt = np.gradient(p_gt, t_gt, axis=0, edge_order=2)
-        a_world = np.gradient(v_gt, t_gt, axis=0, edge_order=2)
+        source_dt = float(np.median(np.diff(t_gt)))
+        v_gt, a_world = self._source_position_derivatives(p_gt, t_gt, source_dt)
         imu_at_gt = np.zeros((t_gt.shape[0], 6), dtype=np.float64)
         for axis in range(6):
             imu_at_gt[:, axis] = np.interp(t_gt, ts, imu_resampled[:, 1 + axis])
@@ -2126,8 +2624,6 @@ class LIASuwDebiasDataset(BaseDataset):
         ts_t = torch.from_numpy(ts).double()
         coeff = Interpolation.get_cubic_hermite_coeffs(ts_t, imu_t)
         imu_coeff = tuple(x.float() for x in coeff)
-        source_dt = float(np.median(np.diff(t_gt)))
-
         precomputed_valid_path = Path(data_dir) / sequence / "mav0" / "quality" / f"valid_source_starts_{self._loss_window}.txt"
         if precomputed_valid_path.exists() and precomputed_valid_path.read_text(encoding="utf-8").strip():
             valid_starts = np.atleast_1d(np.loadtxt(precomputed_valid_path, dtype=np.int64)).astype(np.int64)
@@ -2138,6 +2634,7 @@ class LIASuwDebiasDataset(BaseDataset):
             raise ValueError(f"No valid non-interpolated mocap windows remain for {sequence} after overlap cropping.")
 
         gravity_cache_key = self._gravity_cache_key(sequence)
+        source_derivative_key = self._source_derivative_cache_key()
         print(
             f"  supervision_source={MOCAP_NONINTERP_SUPERVISION}, "
             f"mocap_poses={t_gt.shape[0]}, source_dt_median={source_dt:.6f}s, "
@@ -2160,6 +2657,7 @@ class LIASuwDebiasDataset(BaseDataset):
                 "supervision_source": MOCAP_NONINTERP_SUPERVISION,
                 "R_gravity_alignment": np.eye(3, dtype=np.float64).tolist(),
                 "gravity_calibration": gravity_cache_key,
+                "source_derivative_filter": source_derivative_key,
             },
             self.data_cache_dir,
             sequence + ".p",
@@ -2174,6 +2672,7 @@ class LIASuwDebiasDataset(BaseDataset):
                 "supervision_source": MOCAP_NONINTERP_SUPERVISION,
                 "R_gravity_alignment": np.eye(3, dtype=np.float64).tolist(),
                 "gravity_calibration": gravity_cache_key,
+                "source_derivative_filter": source_derivative_key,
             },
             self.data_cache_dir,
             sequence + "_gt.p",
@@ -2240,8 +2739,8 @@ class LIASuwDebiasDataset(BaseDataset):
         q_gt = q_gt / q_gt.norm(dim=1, keepdim=True)
         rot_gt = Lie.quat_to_SO3(q_gt).cpu()
 
-        v_gt = np.gradient(p_gt, t_gt, axis=0, edge_order=2)
-        a_world = np.gradient(v_gt, t_gt, axis=0, edge_order=2)
+        source_dt = float(np.median(np.diff(t_gt)))
+        v_gt, a_world = self._source_position_derivatives(p_gt, t_gt, source_dt)
         imu_at_gt = np.zeros((t_gt.shape[0], 6), dtype=np.float64)
         for axis in range(6):
             imu_at_gt[:, axis] = np.interp(t_gt, ts, imu_resampled[:, 1 + axis])
@@ -2266,8 +2765,8 @@ class LIASuwDebiasDataset(BaseDataset):
         ts_t = torch.from_numpy(ts).double()
         coeff = Interpolation.get_cubic_hermite_coeffs(ts_t, imu_t)
         imu_coeff = tuple(x.float() for x in coeff)
-        source_dt = float(np.median(np.diff(t_gt)))
         valid_starts = self._valid_source_starts(t_gt, source_dt)
+        source_derivative_key = self._source_derivative_cache_key()
 
         print(
             f"  supervision_source={VO_IMU_NONINTERP_SUPERVISION}, "
@@ -2298,6 +2797,7 @@ class LIASuwDebiasDataset(BaseDataset):
                 "R_gravity_alignment": R_gravity_align.tolist(),
                 "vo_pose_path": str(path_vo),
                 "gravity_calibration": gravity_cache_key,
+                "source_derivative_filter": source_derivative_key,
             },
             self.data_cache_dir,
             sequence + ".p",
@@ -2312,6 +2812,7 @@ class LIASuwDebiasDataset(BaseDataset):
                 "supervision_source": VO_IMU_NONINTERP_SUPERVISION,
                 "vo_supervision_world_frame": self._vo_supervision_world_frame,
                 "gravity_calibration": gravity_cache_key,
+                "source_derivative_filter": source_derivative_key,
             },
             self.data_cache_dir,
             sequence + "_gt.p",
@@ -2640,6 +3141,21 @@ def parse_args() -> argparse.Namespace:
         help="Reject source-timing VO loss windows containing pose-to-pose gaps larger than nominal dt plus this tolerance.",
     )
     parser.add_argument(
+        "--source-position-sg-window",
+        type=int,
+        default=0,
+        help=(
+            "For source-timing mocap/VO supervision, optionally derive v/a labels from a Savitzky-Golay "
+            "filter on position instead of raw finite differences. 0 keeps the legacy gradient path."
+        ),
+    )
+    parser.add_argument(
+        "--source-position-sg-order",
+        type=int,
+        default=3,
+        help="Polynomial order for --source-position-sg-window.",
+    )
+    parser.add_argument(
         "--gravity-calibration-json",
         type=Path,
         default=None,
@@ -2657,6 +3173,7 @@ def parse_args() -> argparse.Namespace:
         help="Fallback gravity acceleration vector in the supervision world frame. Default preserves old behavior.",
     )
     parser.add_argument("--train-seqs", nargs="+", default=DEFAULT_TRAIN_SEQS)
+    parser.add_argument("--val-seqs", nargs="+", default=None)
     parser.add_argument("--test-seqs", nargs="+", default=DEFAULT_TEST_SEQS)
     parser.add_argument("--integral_method", type=str, default="euler")
     parser.add_argument(
@@ -2670,6 +3187,7 @@ def parse_args() -> argparse.Namespace:
             f"{GYRO_PHYS_DELTA_NAME} for the no-derivative finite-difference ablation, "
             f"{GYRO_FBU_RESIDUAL_NAME} for the pure f(b,u) residual MLP, "
             f"{GYRO_SLOW_RESIDUAL_NAME} for the slow rate-limited residual ablation, "
+            f"{GYRO_CONSERVATIVE_RESIDUAL_NAME} for the shared conservative residual model, "
             f"or {GYRO_BASELINE_NO_UDOT_NAME} for the original-style network without u_dot."
         ),
     )
@@ -2684,6 +3202,7 @@ def parse_args() -> argparse.Namespace:
             f"{ACC_PHYS_DELTA_NAME} for the no-derivative finite-difference ablation, "
             f"{ACC_FBU_RESIDUAL_NAME} for the pure f(b,u) residual MLP, "
             f"{ACC_SLOW_RESIDUAL_NAME} for the slow rate-limited residual ablation, "
+            f"{ACC_CONSERVATIVE_RESIDUAL_NAME} for the shared conservative residual model, "
             f"or {ACC_BASELINE_NO_UDOT_NAME} for the original-style network without u_dot."
         ),
     )
@@ -2703,11 +3222,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--acc-loss-pos-weight", type=float, default=1.0)
     parser.add_argument(
         "--acc-loss-type",
-        choices=["se23", "nll", "interval_nll"],
+        choices=["se23", "nll", "interval_nll", "trajectory_nll"],
         default="se23",
         help=(
             "Accelerometer-stage supervision loss. 'nll' is the per-state/endpoint SE_2(3) "
-            "trajectory likelihood; 'interval_nll' is an interval preintegration-factor likelihood."
+            "trajectory likelihood; 'interval_nll' is an interval preintegration-factor likelihood; "
+            "'trajectory_nll' is the stacked trajectory-state likelihood with cross-time covariance."
         ),
     )
     parser.add_argument(
@@ -2749,7 +3269,7 @@ def parse_args() -> argparse.Namespace:
         dest="nll_train_gyro",
         action="store_true",
         help=(
-            "For --acc-loss-type=nll or interval_nll: jointly fine-tune the loaded gyro bias dynamics "
+            "For --acc-loss-type=nll, interval_nll, or trajectory_nll: jointly fine-tune the loaded gyro bias dynamics "
             "with the accel bias dynamics. Default keeps the previous fixed-gyro behavior."
         ),
     )
@@ -2824,6 +3344,30 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Optional checkpoint containing raw_sigma_g2/raw_sigma_a2 for interval NLL stage initialization.",
     )
+    parser.add_argument(
+        "--trajectory-supervision-mode",
+        "--trajectory_supervision_mode",
+        dest="trajectory_supervision_mode",
+        choices=["sparse", "endpoint"],
+        default="sparse",
+        help="For trajectory NLL: select sparse intermediate states or the endpoint-only baseline.",
+    )
+    parser.add_argument(
+        "--trajectory-supervision-stride",
+        "--trajectory_supervision_stride",
+        dest="trajectory_supervision_stride",
+        type=int,
+        default=1,
+        help="For trajectory NLL sparse mode: use every K supervised states after the initial state.",
+    )
+    parser.add_argument(
+        "--trajectory-max-supervised-states",
+        "--trajectory_max_supervised_states",
+        dest="trajectory_max_supervised_states",
+        type=int,
+        default=0,
+        help="For trajectory NLL sparse mode: optional cap on supervised states per window; 0 means no cap.",
+    )
     parser.add_argument("--val_freq", type=int, default=1)
     parser.add_argument("--save_freq", type=int, default=1)
     parser.add_argument("--train_batch_strategy", choices=["random_sequence", "balanced_sequences"], default="random_sequence")
@@ -2877,6 +3421,18 @@ def parse_args() -> argparse.Namespace:
         help="Window length used by mean_window/median_window initial bias policies.",
     )
     parser.add_argument(
+        "--train-initial-bw-mode",
+        choices=["label", "zero"],
+        default="label",
+        help="Initial gyro-bias state used inside training/validation ODE windows.",
+    )
+    parser.add_argument(
+        "--train-initial-ba-mode",
+        choices=["label", "zero"],
+        default="label",
+        help="Initial accel-bias state used inside training/validation ODE windows.",
+    )
+    parser.add_argument(
         "--readable-val-metrics",
         action=argparse.BooleanOptionalAction,
         default=True,
@@ -2887,11 +3443,12 @@ def parse_args() -> argparse.Namespace:
 
 
 def make_dataset_parameters(args: argparse.Namespace) -> dict:
+    val_seqs = list(args.val_seqs) if args.val_seqs is not None else list(args.train_seqs)
     return {
         "dataset_name": "TUM",
         "data_dir": str(args.data_root),
         "train_seqs": list(args.train_seqs),
-        "val_seqs": list(args.train_seqs),
+        "val_seqs": val_seqs,
         "test_seqs": list(args.test_seqs),
         "percent_for_val": args.percent_for_val,
         "batch_size": args.batch_size,
@@ -2907,6 +3464,8 @@ def make_dataset_parameters(args: argparse.Namespace) -> dict:
         "vo_gap_tolerance_s": args.vo_gap_tolerance_s,
         "gravity_calibration_json": args.gravity_calibration_json,
         "gravity_accel_world": tuple(args.gravity_accel_world),
+        "source_position_sg_window": args.source_position_sg_window,
+        "source_position_sg_order": args.source_position_sg_order,
     }
 
 
@@ -2942,10 +3501,12 @@ def main():
         raise ValueError("--nll-q-block-epochs must be positive")
     if args.acc_loss_type == "nll" and args.nll_supervision_mode != "per_state" and not args.readable_val_metrics:
         raise ValueError("NLL endpoint supervision is implemented in the PLATO readable-metrics trainer.")
-    if args.acc_loss_type == "interval_nll" and not args.readable_val_metrics:
-        raise ValueError("Interval preintegration NLL is implemented in the PLATO readable-metrics trainer.")
-    if args.acc_loss_type == "interval_nll" and args.interval_nll_mode != "nll_joint" and args.nll_train_gyro:
+    if args.acc_loss_type in {"interval_nll", "trajectory_nll"} and not args.readable_val_metrics:
+        raise ValueError("PLATO preintegration NLL variants are implemented in the readable-metrics trainer.")
+    if args.acc_loss_type in {"interval_nll", "trajectory_nll"} and args.interval_nll_mode != "nll_joint" and args.nll_train_gyro:
         raise ValueError("--nll-train-gyro is only meaningful with --interval-nll-mode=nll_joint.")
+    if args.acc_loss_type == "trajectory_nll" and args.interval_covariance_gradient_mode != "analytic_sensitivity":
+        raise ValueError("--acc-loss-type=trajectory_nll currently requires --interval-covariance-gradient-mode=analytic_sensitivity.")
     if args.ba_init_model_path is not None and not args.readable_val_metrics:
         raise ValueError("--ba-init-model-path requires the PLATO readable-metrics trainer.")
     use_delta_imu = _uses_delta_imu(args.network_type_Gyro, args.network_type_Acc)
@@ -2962,18 +3523,38 @@ def main():
 
     print("LIASuw Debias_IMU AD pipeline")
     print(f"train_seqs={args.train_seqs}")
+    print(f"val_seqs={args.val_seqs if args.val_seqs is not None else args.train_seqs}")
     print(f"test_seqs={args.test_seqs}")
     print(f"trainval_supervision_source={args.trainval_supervision_source}")
     print(f"gravity_accel_world_default={tuple(args.gravity_accel_world)}")
+    print(
+        f"source_position_sg_window={args.source_position_sg_window}, "
+        f"source_position_sg_order={args.source_position_sg_order}"
+    )
     if args.gravity_calibration_json is not None:
         print(f"gravity_calibration_json={args.gravity_calibration_json}")
+    ode_grid_window_s = (args.loss_window - 1) * args.dt
     if args.trainval_supervision_source == VO_IMU_NONINTERP_SUPERVISION:
         print(f"pseudo_gt_root={args.pseudo_gt_root}")
         print(f"vo_supervision_world_frame={args.vo_supervision_world_frame}")
-        print(f"source-timing loss_window={args.loss_window} VO poses, nominal span is about {(args.loss_window - 1) * 0.05:.3f}s")
+        print(
+            f"source_timing_window={args.loss_window} VO poses; physical span is read from VO timestamps, "
+            f"not assumed from IMU dt. ode_grid_window_s={ode_grid_window_s:.6g} from dt={args.dt}"
+        )
+    elif args.trainval_supervision_source == MOCAP_NONINTERP_SUPERVISION:
+        print(
+            f"source_timing_window={args.loss_window} mocap poses; physical span is read from mocap timestamps, "
+            f"not assumed from IMU dt. ode_grid_window_s={ode_grid_window_s:.6g} from dt={args.dt}"
+        )
     print(f"network_type_Gyro={args.network_type_Gyro}, network_type_Acc={args.network_type_Acc}")
     print(f"device={args.device}, test_device={args.test_device}, epoch={args.epoch}, loss_window={args.loss_window}")
+    if args.trainval_supervision_source == MOCAP_200HZ_SUPERVISION:
+        print(f"nominal_imu_window_s={ode_grid_window_s:.6g} from loss_window={args.loss_window}, dt={args.dt}")
     print(f"acc_loss_type={args.acc_loss_type}")
+    print(
+        f"train_initial_bw_mode={args.train_initial_bw_mode}, "
+        f"train_initial_ba_mode={args.train_initial_ba_mode}"
+    )
     if args.acc_loss_type == "nll":
         print(
             "nll_covariance "
@@ -2985,9 +3566,9 @@ def main():
             f"sigma_a_bounds=({args.nll_sigma_a_min}, {args.nll_sigma_a_max}), "
             f"sigma_g_bounds=({args.nll_sigma_g_min}, {args.nll_sigma_g_max})"
         )
-    if args.acc_loss_type == "interval_nll":
+    if args.acc_loss_type in {"interval_nll", "trajectory_nll"}:
         print(
-            "interval_nll "
+            f"{args.acc_loss_type} "
             f"mode={args.interval_nll_mode}, train_gyro={args.nll_train_gyro}, "
             f"sigma_a_nominal={args.interval_sigma_a_nominal}, sigma_g_nominal={args.interval_sigma_g_nominal}, "
             f"sigma_a_floor2={args.interval_sigma_a_floor2}, sigma_g_floor2={args.interval_sigma_g_floor2}, "
@@ -2996,7 +3577,10 @@ def main():
             f"lr_sigma={args.interval_lr_sigma}, detach_covariance_theta={args.interval_detach_covariance_theta}, "
             f"covariance_gradient_mode={args.interval_covariance_gradient_mode}, "
             f"debug_covariance_gradients={args.interval_debug_covariance_gradients}, "
-            f"noise_init={args.interval_noise_init_model_path}"
+            f"noise_init={args.interval_noise_init_model_path}, "
+            f"trajectory_mode={args.trajectory_supervision_mode}, "
+            f"trajectory_stride={args.trajectory_supervision_stride}, "
+            f"trajectory_max_states={args.trajectory_max_supervised_states}"
         )
     if args.stop_after_gyro or args.skip_gyro_train or args.skip_test:
         print(
@@ -3038,7 +3622,7 @@ def main():
         gyro_train_fn = Gyro_train_with_readable_metrics if args.readable_val_metrics else Gyro_train
         if args.acc_loss_type == "nll":
             acc_train_fn = Acc_train_SE23_NLL_with_readable_metrics if args.readable_val_metrics else debias_learning.Acc_train_SE23_NLL
-        elif args.acc_loss_type == "interval_nll":
+        elif args.acc_loss_type in {"interval_nll", "trajectory_nll"}:
             acc_train_fn = Acc_train_interval_preintegration_NLL_with_readable_metrics
         else:
             acc_train_fn = Acc_train_SE23_with_readable_metrics if args.readable_val_metrics else Acc_train_SE23
@@ -3060,6 +3644,14 @@ def main():
                 train_batch_strategy=args.train_batch_strategy,
                 val_freq=args.val_freq,
                 save_freq=args.save_freq,
+                **(
+                    {
+                        "train_initial_bw_mode": args.train_initial_bw_mode,
+                        "train_initial_ba_mode": args.train_initial_ba_mode,
+                    }
+                    if args.readable_val_metrics
+                    else {}
+                ),
             )
 
         if args.stop_after_gyro:
@@ -3075,11 +3667,26 @@ def main():
                             "trainval_supervision_source": args.trainval_supervision_source,
                             "pseudo_gt_root": str(args.pseudo_gt_root),
                             "vo_supervision_world_frame": args.vo_supervision_world_frame,
+                            "vo_gap_tolerance_s": args.vo_gap_tolerance_s,
+                            "source_position_sg_window": args.source_position_sg_window,
+                            "source_position_sg_order": args.source_position_sg_order,
                             "train_seqs": list(args.train_seqs),
                             "test_seqs": list(args.test_seqs),
                             "loss_window": args.loss_window,
+                            "ode_grid_window_s": (args.loss_window - 1) * args.dt,
+                            "nominal_imu_window_s": (args.loss_window - 1) * args.dt
+                            if args.trainval_supervision_source == MOCAP_200HZ_SUPERVISION
+                            else None,
+                            "source_timing_window_note": (
+                                "loss_window counts source poses; physical span is read from source timestamps"
+                                if args.trainval_supervision_source
+                                in {MOCAP_NONINTERP_SUPERVISION, VO_IMU_NONINTERP_SUPERVISION}
+                                else None
+                            ),
                             "batch_size": args.batch_size,
                             "network_type_Gyro": args.network_type_Gyro,
+                            "train_initial_bw_mode": args.train_initial_bw_mode,
+                            "train_initial_ba_mode": args.train_initial_ba_mode,
                             "stage_control": "stop_after_gyro",
                             "gyro_checkpoint": str(gyro_ckpt),
                         },
@@ -3113,7 +3720,7 @@ def main():
                     "nll_mean_anchor_mode": args.nll_mean_anchor_mode,
                 }
             )
-        elif args.acc_loss_type == "interval_nll":
+        elif args.acc_loss_type in {"interval_nll", "trajectory_nll"}:
             acc_kwargs.update(
                 {
                     "interval_nll_mode": args.interval_nll_mode,
@@ -3132,13 +3739,19 @@ def main():
                     "interval_noise_init_model_path": args.interval_noise_init_model_path,
                     "nll_train_gyro": args.nll_train_gyro,
                     "ba_init_model_path": args.ba_init_model_path,
+                    "nll_family": "trajectory_state" if args.acc_loss_type == "trajectory_nll" else "interval",
+                    "trajectory_supervision_mode": args.trajectory_supervision_mode,
+                    "trajectory_supervision_stride": args.trajectory_supervision_stride,
+                    "trajectory_max_supervised_states": args.trajectory_max_supervised_states,
                 }
             )
         if args.readable_val_metrics:
             acc_kwargs["bw_model_name"] = args.network_type_Gyro
+            acc_kwargs["train_initial_bw_mode"] = args.train_initial_bw_mode
+            acc_kwargs["train_initial_ba_mode"] = args.train_initial_ba_mode
             if args.ba_init_model_path is not None:
                 acc_kwargs["ba_init_model_path"] = args.ba_init_model_path
-            if args.acc_loss_type in {"se23", "interval_nll"}:
+            if args.acc_loss_type in {"se23", "interval_nll", "trajectory_nll"}:
                 acc_kwargs["acc_loss_rot_weight"] = args.acc_loss_rot_weight
                 acc_kwargs["acc_loss_vel_weight"] = args.acc_loss_vel_weight
                 acc_kwargs["acc_loss_pos_weight"] = args.acc_loss_pos_weight
@@ -3164,7 +3777,7 @@ def main():
             save_freq=args.save_freq,
             **acc_kwargs,
         )
-        if args.acc_loss_type in {"nll", "interval_nll"} and args.nll_train_gyro:
+        if args.acc_loss_type in {"nll", "interval_nll", "trajectory_nll"} and args.nll_train_gyro:
             gyro_ckpt = resolve_checkpoint(
                 args.outputdir,
                 "Gyro_weights",
@@ -3188,6 +3801,8 @@ def main():
                         "pseudo_gt_root": str(args.pseudo_gt_root),
                         "vo_supervision_world_frame": args.vo_supervision_world_frame,
                         "vo_gap_tolerance_s": args.vo_gap_tolerance_s,
+                        "source_position_sg_window": args.source_position_sg_window,
+                        "source_position_sg_order": args.source_position_sg_order,
                         "gravity_accel_world_default": tuple(args.gravity_accel_world),
                         "gravity_calibration_json": str(args.gravity_calibration_json)
                         if args.gravity_calibration_json is not None
@@ -3195,6 +3810,16 @@ def main():
                         "train_seqs": list(args.train_seqs),
                         "test_seqs": list(args.test_seqs),
                         "loss_window": args.loss_window,
+                        "ode_grid_window_s": (args.loss_window - 1) * args.dt,
+                        "nominal_imu_window_s": (args.loss_window - 1) * args.dt
+                        if args.trainval_supervision_source == MOCAP_200HZ_SUPERVISION
+                        else None,
+                        "source_timing_window_note": (
+                            "loss_window counts source poses; physical span is read from source timestamps"
+                            if args.trainval_supervision_source
+                            in {MOCAP_NONINTERP_SUPERVISION, VO_IMU_NONINTERP_SUPERVISION}
+                            else None
+                        ),
                         "batch_size": args.batch_size,
                         "integral_method": args.integral_method,
                         "network_type_Gyro": args.network_type_Gyro,
@@ -3202,6 +3827,8 @@ def main():
                         "acc_loss_type": args.acc_loss_type,
                         "initial_bias_mode": args.initial_bias_mode,
                         "initial_bias_window_s": args.initial_bias_window_s,
+                        "train_initial_bw_mode": args.train_initial_bw_mode,
+                        "train_initial_ba_mode": args.train_initial_ba_mode,
                         "acc_loss_rot_weight": args.acc_loss_rot_weight,
                         "acc_loss_vel_weight": args.acc_loss_vel_weight,
                         "acc_loss_pos_weight": args.acc_loss_pos_weight,
@@ -3240,6 +3867,9 @@ def main():
                         "interval_noise_init_model_path": str(args.interval_noise_init_model_path)
                         if args.interval_noise_init_model_path is not None
                         else None,
+                        "trajectory_supervision_mode": args.trajectory_supervision_mode,
+                        "trajectory_supervision_stride": args.trajectory_supervision_stride,
+                        "trajectory_max_supervised_states": args.trajectory_max_supervised_states,
                         "readable_val_metrics": args.readable_val_metrics,
                         "device": args.device,
                         "test_device": args.test_device,

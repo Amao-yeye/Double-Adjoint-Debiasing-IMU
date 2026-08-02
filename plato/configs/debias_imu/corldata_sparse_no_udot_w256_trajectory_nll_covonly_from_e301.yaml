@@ -1,0 +1,86 @@
+dataset: corldata
+supervision: gt
+loss_type: se23_gt_supervision
+input_mode: u
+trainval_supervision_source: mocap_noninterp
+
+model:
+  type: bias_dynamics_node
+  use_udot: false
+loss:
+  type: trajectory_state_nll
+  covariance_scaling: 1.0
+  use_logdet: true
+supervision_config:
+  mode: sparse
+  stride: 16
+  max_supervised_states: 16
+  align_to_imu_frame: true
+
+data_root: results/debias_imu/corldata_IMU_aligned_gt_vo_ref_sparse_gt
+cache_dir: results/debias_imu/cache/corldata_sparse_no_udot_w256_trajectory_nll_covonly_from_e301
+outputdir: results/debias_imu/corldata_sparse_no_udot_w256_trajectory_nll_covonly_from_e301
+
+# Stage-2 covariance calibration for the current corldata no-u_dot SE23 mean.
+# This is the full stacked trajectory-state NLL, not the interval-factor NLL.
+train_seqs: [S00, S01, S02, S03]
+test_seqs: [S13, S15]
+window_size: 256
+dt: 0.001
+batch_size: 32
+epoch: 21
+percent_for_val: 0.2
+train_batch_strategy: random_sequence
+
+network_type_Gyro: bw_func_net_no_udot
+network_type_Acc: ba_func_net_no_udot
+bw_model_path: results/debias_imu/corldata_sparse_endpoint_no_udot_w128_sg101_initmedian5_e301_s13s15/Gyro_weights/best_val_model.pt
+ba_init_model_path: results/debias_imu/corldata_sparse_endpoint_no_udot_w128_sg101_initmedian5_e301_s13s15/Acc_weights/best_val_model.pt
+skip_gyro_train: true
+
+lr_Gyro: 0.005
+lr_Acc: 0.001
+weight_decay_Gyro: 0.000001
+weight_decay_Acc: 0.000001
+gyro_lr_step_size: 150
+acc_lr_step_size: 75
+gyro_lr_gamma: 0.5
+acc_lr_gamma: 0.5
+val_freq: 5
+save_freq: 10
+
+acc_loss_type: trajectory_nll
+interval_nll_mode: nll_cov_only
+interval_sigma_a_nominal: 0.002793442
+interval_sigma_g_nominal: 0.000241539
+interval_sigma_a_floor2: 0.0000000001
+interval_sigma_g_floor2: 0.000000000001
+interval_target_cov_floor: 0.000000001
+interval_jitter: 0.00000001
+interval_lr_sigma: 0.005
+interval_prior_lambda_a: 0.001
+interval_prior_lambda_g: 0.001
+interval_detach_covariance_theta: true
+interval_covariance_gradient_mode: analytic_sensitivity
+interval_debug_covariance_gradients: false
+trajectory_supervision_mode: sparse
+trajectory_supervision_stride: 16
+trajectory_max_supervised_states: 16
+
+acc_loss_rot_weight: 1.0
+acc_loss_vel_weight: 1.0
+acc_loss_pos_weight: 1.0
+
+use_best_val: true
+readable_val_metrics: true
+
+sg_window_bw: 101
+sg_order_bw: 3
+sg_window_ba: 31
+sg_order_ba: 3
+
+initial_bias_mode: median_window
+initial_bias_window_s: 5.0
+
+device: cuda
+test_device: cuda

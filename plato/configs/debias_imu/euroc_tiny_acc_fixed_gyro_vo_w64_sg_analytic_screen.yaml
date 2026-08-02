@@ -1,0 +1,46 @@
+dataset: euroc
+train_supervision: vo
+trainval_gt_root: external/Debias_IMU/rss_debiasing_restart/Debias_IMU/dataset/Euroc_VO
+trainval_gt_source: stereo_estimate_aligned_body
+supervision_timing: imu
+exclude_train_seq:
+  - V2_03_difficult
+cache_dir: results/debias_imu/cache/EUROC_tiny_acc_fixed_gyro_vo_body_w64_sg_noV203
+test_cache_dir: results/debias_imu/cache/EUROC_test_gt
+outputdir: results/debias_imu/EUROC_tiny_acc_fixed_gyro_vo_body_w64_sg_analytic_e301_b1000_noV203
+
+network_type_Gyro: bw_func_slow_residual_tiny
+network_type_Acc: ba_func_slow_residual_tiny
+bw_model_path: results/debias_imu/EUROC_slow_residual_tiny_constinit_gt_w64_sg_ad_e301_b1000/Gyro_weights/model_epoch_0.pt
+skip_gyro_train: true
+gyro_loss: ad
+acc_loss: analytic
+loss_window: 64
+batch_size: 1000
+epoch: 301
+lr_Gyro: 0.0005
+lr_Acc: 0.0005
+weight_decay_Gyro: 0.000001
+weight_decay_Acc: 0.000001
+gyro_lr_step_size: 150
+acc_lr_step_size: 150
+gyro_lr_gamma: 0.5
+acc_lr_gamma: 0.5
+val_freq: 50
+save_freq: 100
+sg_window_bw: 101
+sg_order_bw: 3
+sg_window_ba: 31
+sg_order_ba: 3
+initial_bias_mode: median_window
+initial_bias_window_s: 5.0
+analytic_grad_sign: 1.0
+analytic_grad_scale: 1.0
+analytic_grad_clip_norm: 1.0
+analytic_residual_jacobian: left
+analytic_invariant_error: right
+inner_vjp: local_ad
+device: cuda
+test_device: cpu
+use_best_val: true
+readable_val_metrics: true

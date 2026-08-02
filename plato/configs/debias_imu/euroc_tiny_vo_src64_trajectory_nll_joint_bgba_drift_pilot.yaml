@@ -1,0 +1,86 @@
+dataset: euroc
+train_supervision: vo
+supervision_timing: source
+
+model:
+  type: bias_dynamics_node
+  use_udot: false
+loss:
+  type: trajectory_state_nll
+  covariance_scaling: 1.0
+  use_logdet: true
+supervision_config:
+  mode: sparse
+  stride: 4
+  max_supervised_states: 16
+  align_to_imu_frame: true
+
+cache_dir: results/debias_imu/cache/EUROC_no_udot_vo_body_src64_trajectory_nll
+test_cache_dir: results/debias_imu/cache/EUROC_test_gt
+outputdir: results/debias_imu/EUROC_tiny_vo_src64_trajectory_nll_joint_bgba_drift_pilot
+
+# Drift-first pilot:
+# - initialize from the current best EuRoC no-u_dot VO-supervised tiny model;
+# - train both gyro and accel bias dynamics with the full trajectory-state NLL;
+# - keep LR low and evaluate by full held-out pure-IMU rollout drift, not NLL alone.
+network_type_Gyro: bw_func_slow_residual_tiny
+network_type_Acc: ba_func_slow_residual_tiny
+bw_model_path: results/debias_imu/EUROC_slow_residual_tiny_constinit_gt_w64_sg_ad_e301_b1000/Gyro_weights/model_epoch_0.pt
+ba_init_model_path: results/debias_imu/EUROC_tiny_acc_fixed_gyro_vo_body_w64_sg_ad_e301_b1000_noV203/Acc_weights/best_val_model.pt
+interval_noise_init_model_path: results/debias_imu/EUROC_tiny_acc_fixed_gyro_vo_src64_interval_nll_covonly_from_best/Acc_weights/best_val_model.pt
+skip_gyro_train: true
+
+exclude_train_seq: [V2_03_difficult]
+loss_window: 64
+# EuRoC VO/source timestamps are about 20 Hz: 64 poses span about 3.15 s.
+batch_size: 8
+epoch: 31
+lr_Gyro: 0.00001
+lr_Acc: 0.00001
+weight_decay_Gyro: 0.000001
+weight_decay_Acc: 0.000001
+gyro_lr_step_size: 75
+acc_lr_step_size: 75
+gyro_lr_gamma: 0.5
+acc_lr_gamma: 0.5
+val_freq: 5
+save_freq: 10
+train_batch_strategy: random_sequence
+percent_for_val: 0.2
+
+acc_loss_type: trajectory_nll
+interval_nll_mode: nll_joint
+nll_train_gyro: true
+interval_sigma_a_nominal: 0.0030
+interval_sigma_g_nominal: 0.00026
+interval_sigma_a_floor2: 0.0000000001
+interval_sigma_g_floor2: 0.000000000001
+interval_target_cov_floor: 0.000000001
+interval_jitter: 0.00000001
+interval_lr_sigma: 0.001
+interval_prior_lambda_a: 0.001
+interval_prior_lambda_g: 0.001
+interval_detach_covariance_theta: true
+interval_covariance_gradient_mode: analytic_sensitivity
+trajectory_supervision_mode: sparse
+trajectory_supervision_stride: 4
+trajectory_max_supervised_states: 16
+
+acc_loss_rot_weight: 1.0
+acc_loss_vel_weight: 1.0
+acc_loss_pos_weight: 1.0
+
+use_best_val: true
+readable_val_metrics: true
+
+sg_window_bw: 15
+sg_order_bw: 3
+sg_window_ba: 15
+sg_order_ba: 3
+dt: 0.005
+
+initial_bias_mode: first
+initial_bias_window_s: 1.0
+
+device: cuda
+test_device: cpu

@@ -2,6 +2,8 @@
 
 Date: 2026-05-17
 
+Update: 2026-05-20
+
 This note records which S13/S15 self-initialized OpenVINS learned-IMU strategies are useful and which should not be repeated. It is intentionally operational: use it before launching new OpenVINS corldata trials.
 
 ## Current Best
@@ -39,6 +41,109 @@ First-light-on common-horizon results:
 | final re-entry stabilized | 3.615 | 3.692 | 2.139 | 2.290 |
 
 Use first-light-on alignment as the main deployment-style metric: it fixes the initially good-vision interval before the dark intervals and exposes post-dark re-entry stability.
+
+## Rotation Metric Caveat
+
+Do not report the OpenVINS `rot_rmse_deg` values from `summarize_corldata_openvins_natural.py` or the common-horizon CSVs as the final corldata rotation comparison. Those values apply the position SE(3) alignment rotation directly to the estimated orientations. On corldata this can be dominated by a fixed DAVIS/IMU-to-mocap `Body_0` frame mismatch, the same issue already recorded for direct corldata rotation APE. In particular, this wrong/unsafe position-alignment orientation metric makes S15 appear to have about `45 deg` rotation RMSE even when the trajectory is position-stable.
+
+Use a fixed-frame orientation compensation fitted on the first light-on interval if a rotation table is needed. With the same first-light-on common-horizon position evaluation used above, the current values are:
+
+| Sequence | Method | Position RMSE m | rotation RMSE deg, unsafe position alignment | rotation RMSE deg, fixed-frame orientation fit |
+| --- | --- | ---: | ---: | ---: |
+| S13 | final re-entry stabilized | 3.512 | 7.951 | 3.165 |
+| S13 | duration-only learned gyro | 25.770 | 9.810 | 5.439 |
+| S13 | raw | 53.285 | 7.025 | 5.363 |
+| S15 | final re-entry stabilized | 2.066 | 45.584 | 3.218 |
+| S15 | duration-only learned gyro | 2.539 | 45.708 | 3.486 |
+| S15 | raw | 78.176 | 45.651 | 10.137 |
+
+For paper tables, use the fixed-frame orientation-fit values if reporting rotation, or omit rotation and report position only. Do not reuse the older table with S15 rotation near `45 deg`.
+
+## Testing Set Scope
+
+The retained OpenVINS corldata trajectory comparison currently covers only S13/S15. Do not call the S13/S15 OpenVINS table the full testing set.
+
+The full Debias_IMU testing set includes S13, S15, and S20/S21/S22/S23. For that scope, report the standalone full-rollout IMU metrics instead of OpenVINS trajectory RMSE: position is ATE position in meters, and rotation is AOE in degrees. The current comparison is:
+
+| Sequence | Ours pos m | Debiasing pos m | Raw pos m | Ours AOE deg | Debiasing AOE deg | Raw AOE deg |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| S13 | 181.865 | 209.924 | 2938.829 | 7.166 | 7.953 | 33.440 |
+| S15 | 290.986 | 293.826 | 798.635 | 6.534 | 7.237 | 21.189 |
+| S20 | 367.829 | 379.988 | 1404.485 | 11.519 | 11.862 | 27.358 |
+| S21 | 400.659 | 425.325 | 1534.502 | 10.405 | 10.651 | 30.597 |
+| S22 | 688.301 | 699.811 | 1688.339 | 23.305 | 23.698 | 31.129 |
+| S23 | 484.814 | 488.159 | 1757.588 | 11.630 | 12.283 | 28.437 |
+| Avg. | 402.409 | 416.172 | 1687.063 | 11.760 | 12.281 | 28.692 |
+
+Here, `Ours` is `interval_nll_joint`; `Debiasing` is the previous SE23 e301 model; `Raw` is uncorrected IMU. S20-S23 values come from `results/debias_imu/corldata_interval_nll_joint_best_onlytest_s20s21s22s23/s20_s23_onlytest_comparison.csv`; S13/S15 values come from the current interval-NLL joint run and the previous SE23 e301 run recorded in `current_experiment_state.md`.
+
+## S20-S23 OpenVINS Fairness Update
+
+The first S20-S23 OpenVINS sweeps mixed baselines: `raw` used `estimator_config_dynamic.yaml`, while several learned-IMU runs used `estimator_config_dynamic_reentry.yaml`. Do not use those mixed-config tables as the main fairness claim. Re-entry itself strongly changes raw behavior, so raw-vs-ours comparisons must keep the OpenVINS config fixed and change only the IMU bag.
+
+The current fair S20-S23 result uses:
+
+- Raw baseline: `results/openvins_eval/corldata/natural/repacked_raw_s20s23/`
+- Fair learned-IMU runs without re-entry:
+  - `results/openvins_eval/corldata/natural/gated_g100_a000_cg050_ca050_r10_dynamic_runs_s20s23/`
+  - `results/openvins_eval/corldata/natural/gated_gyro_ref_duration_dynamic_runs_s20s23/`
+- Config for both raw and learned runs: `plato/configs/openvins/corldata_0511/estimator_config_dynamic.yaml`
+- Summary: `results/openvins_eval/corldata/natural/fair_s20s23_selected_dynamic_summary.md`
+- Rotation check: `results/openvins_eval/corldata/natural/fair_s20s23_selected_fixed_frame_rotation.md`
+
+Fair first-light-on-aligned, pairwise common-horizon position results:
+
+| Seq | Ours method | Raw RMSE m | Ours RMSE m | Raw final m | Ours final m |
+| --- | --- | ---: | ---: | ---: | ---: |
+| S20 | `Durdyn` | 62.163 | 29.415 | 202.519 | 76.163 |
+| S21 | `G010dyn` | 188.988 | 12.520 | 552.719 | 56.630 |
+| S22 | `G010dyn` | 161.822 | 28.084 | 524.466 | 96.020 |
+| S23 | `Durdyn` | 222.112 | 135.754 | 637.810 | 359.906 |
+| Avg. | selected | 158.771 | 51.443 | 479.379 | 147.180 |
+
+Fixed-frame orientation-fit rotation for the same selected runs:
+
+| Seq | Ours method | Raw rot RMSE deg | Ours rot RMSE deg | Raw final deg | Ours final deg |
+| --- | --- | ---: | ---: | ---: | ---: |
+| S20 | `Durdyn` | 11.969 | 10.931 | 13.000 | 6.636 |
+| S21 | `G010dyn` | 6.437 | 6.272 | 3.720 | 7.169 |
+| S22 | `G010dyn` | 17.204 | 16.633 | 16.514 | 18.615 |
+| S23 | `Durdyn` | 9.085 | 9.234 | 4.800 | 8.750 |
+
+Interpretation:
+
+- Fair dynamic-config position is much better than raw on all S20-S23 sequences.
+- Rotation is roughly tied: slight RMSE improvement on S20-S22 and a slight S23 regression.
+- A single unified `G010dyn` improves S20-S22 but worsens S23. `Durdyn` improves S20/S22/S23 but worsens/early-stops S21. The current selected table is therefore per-sequence, not a single universal policy.
+- `raw+reentry` was also run as a diagnostic at `results/openvins_eval/corldata/natural/repacked_raw_reentry_adaptive_gray_runs_s20s23/`, but it should not be the main baseline because re-entry alone can degrade or change raw behavior.
+- Pure preintegration gains do not guarantee OpenVINS gains. OpenVINS online bias estimation, visual updates, and relinearization make the corrected-IMU interface state-dependent.
+
+## S13-S23 Full-Trajectory Raw / Debiasing / Ours
+
+Update: 2026-05-20
+
+For the corldata OpenVINS table requested with full-trajectory position and rotation, use:
+
+- Evaluator: `plato/scripts/openvins_eval/compare_corldata_openvins_full_trajectory.py`
+- Final six-sequence table: `results/openvins_eval/corldata/natural/final_s13s23_raw_debiasing_ours_full_trajectory.md`
+- S20-S23 subset: `results/openvins_eval/corldata/natural/final_s20s23_raw_debiasing_ours_full_trajectory.md`
+- Alignment: first light-on for position SE(3), no scale.
+- Rotation: separate fixed-frame orientation fit on the first light-on interval; do not use the position-alignment rotation.
+- Raw: `results/openvins_eval/corldata/natural/repacked_raw/` for S13/S15 and `repacked_raw_s20s23/` for S20-S23.
+- Debiasing baseline: previous SE23/e301 model through original full-bias corrected IMU, `raw - baseline network bias`, run with corrected dynamic initialization.
+- Ours: adaptive re-entry stabilized duration-aware learned gyro for S13/S15, and interval-NLL bias source injected as dark-only gyro residual relative to OpenVINS `b_g_ref` for S20-S23; selected S20-S23 gains are S20 `G750`, S21/S22 `G100`, and S23 `G250`.
+
+Six-sequence full-trajectory mean RMSE:
+
+| Method | Position RMSE m | Rotation RMSE deg |
+| --- | ---: | ---: |
+| Raw | 117.843 | 9.415 |
+| Debiasing full-bias correction | 4775.125 | 70.648 |
+| Ours | 35.304 | 8.224 |
+
+Per sequence for ours: S13 `3.512 m / 3.165 deg`, S15 `2.066 / 3.218`, S20 `14.716 / 10.904`, S21 `12.520 / 6.272`, S22 `28.084 / 16.633`, and S23 `150.924 / 9.154`. S20 is the important new gain update: fixed `gamma_g=0.75` is much better than the older duration-aware S20 run for full-trajectory position while also improving rotation RMSE. S23 remains the sequence where raw has slightly lower rotation RMSE (`9.085 deg` vs ours `9.154 deg`), but ours has much lower position error and the six-sequence mean is best on both requested full-trajectory metrics.
+
+Diagnostic caveat: `results/openvins_eval/corldata/natural/final_s20s23_raw_baseline_ours_full_trajectory.md` gives the old SE23/e301 bias the same gated residual interface as ours. Under that interface it nearly matches ours, so it is useful for understanding the interface effect, but it is not the original Debiasing full-bias-correction baseline.
 
 ## Useful Attempts
 

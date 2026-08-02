@@ -1,0 +1,29 @@
+{
+  "dataset": "Euroc",
+  "result_dir": "/home/amao/workspace/PLATO/results/debias_imu/EUROC_conservative_residual_train_global_y0_fullrollout_v201_w256_mse_e31",
+  "sequences": [
+    "MH_02_easy",
+    "MH_04_difficult",
+    "V1_01_easy",
+    "V1_03_difficult",
+    "V2_02_medium"
+  ],
+  "lengths": [
+    50,
+    100,
+    150,
+    200
+  ],
+  "methods": [
+    "raw",
+    "ours"
+  ],
+  "gravity": [
+    0.0,
+    0.0,
+    -9.81
+  ],
+  "window_definition": "L integration intervals at 200 Hz; each window has L+1 state timestamps.",
+  "sampling": "non-overlapping starts at 0, L, 2L, ...; trailing incomplete windows are dropped.",
+  "reported_mean": "mean over all sampled test windows and propagated state timestamps; the initialized first state is excluded from primary mean columns."
+}

@@ -2,6 +2,70 @@
 
 Date: 2026-05-17
 
+Update: 2026-05-20
+
+Current selection policy:
+
+- Optimize and select by testing-set position and rotation error in long-horizon pure IMU rollout. Velocity is reported secondarily.
+- Bias-trend similarity is diagnostic only; do not use bias-trend correlation as a target or success criterion.
+- Formal EuRoC+corldata claims must use the same core no-`u_dot` network structure and the same training strategy on both datasets: SE23 MSE pretraining followed by NLL fine-tuning.
+- Dataset-specific differences are allowed for sampling rate, physical window duration, calibration/frame alignment, supervision source, split, and noise initialization.
+- EuRoC only needs to beat the RSS/original Debias_IMU baseline, not every internal PLATO ablation.
+- A later attempted six-sequence corldata full-test under `results/debias_imu/corldata_sparse_endpoint_no_udot_w256_interval_nll_joint_fulltest/` was stopped by user request after partial outputs for `S13`, `S15`, and `S20`; do not report it as a complete test.
+
+## EuRoC Unified AD MSE-to-NLL Result Status
+
+Current EuRoC RSS/original baseline references:
+
+| Baseline | AOE deg | ATE vel | ATE pos m |
+| --- | ---: | ---: | ---: |
+| `Euroc_baseline_w64` | 3.4944 | 16.2950 | 678.0098 |
+| `Euroc_SE23_w64` | 3.4944 | 16.0696 | 672.2834 |
+
+Important correction from 2026-05-19:
+
+- The 2026-05-18 unified EuRoC MSE/NLL numbers used `initial_bias_mode=median_window`, `initial_bias_window_s=5.0`.
+- That initialization uses each test sequence's GT-differenced bias over the first 5 seconds, so it is oracle-style and must not be reported as a fair RSS comparison.
+- The misleading full result directories were deleted during cleanup. The MSE Acc checkpoint was retained only for audit under `results/debias_imu/checkpoints/euroc_unified_no_udot_mse_lowlr_e51_oracle_audit/`.
+- The corrective only-test result with `initial_bias_mode=first` is retained at `results/debias_imu/EUROC_unified_no_udot_gt_vorate_dedup_src32_dense_mse_lowlr_e51_test_firstbias/`.
+
+Oracle-style unified-architecture EuRoC run from 2026-05-18:
+
+- Core network: `bw_func_net_no_udot` / `ba_func_net_no_udot`
+- Inputs: no `u_dot`
+- Derivatives: AD
+- Supervision: EuRoC GT poses sampled at VO timestamps, deduplicated root `results/debias_imu/Euroc_GT_at_VO_timestamps_dedup/`
+- Sampling: `loss_window=32` source poses, physical duration read from source timestamps
+- Gyro: fixed zero-output constant-bias dynamics
+- Initial bias: `median_window`, `5.0 s`
+- Strategy: SE23 MSE pretraining -> AD interval-NLL fine-tuning
+
+Stage outputs:
+
+| Stage | Output | AOE deg | ATE vel | ATE pos m | Interpretation |
+| --- | --- | ---: | ---: | ---: | --- |
+| MSE, oracle 5s median init | deleted; checkpoint retained under `checkpoints/euroc_unified_no_udot_mse_lowlr_e51_oracle_audit/` | 2.0154 | 13.9936 | 624.5582 | Not fair; test GT-bias initialization |
+| NLL, oracle 5s median init | deleted | 2.0154 | 14.1680 | 630.8582 | Not fair; test GT-bias initialization |
+| MSE, first-bias init | `results/debias_imu/EUROC_unified_no_udot_gt_vorate_dedup_src32_dense_mse_lowlr_e51_test_firstbias/` | 23.218 | 141.311 | 5917.102 | Corrective check; not RSS-beating |
+
+NLL validation was numerically stable: interval NLL decreased from `3631.38` at epoch `0` to `3527.33` at epoch `30`, using `interval_covariance_gradient_mode=ad`. Learned NLL sigmas at epoch `30`: `sigma_a=0.0028348002`, `sigma_g=0.00024517465`.
+
+Conclusion: for EuRoC, the unified no-`u_dot` AD MSE-to-NLL pipeline is runnable, but the previously good-looking RSS-beating result depended on oracle-style test GT-bias initialization. A fair EuRoC RSS-beating claim still needs a new initialization policy and rerun.
+
+Additional 2026-05-19 train-global prior screens:
+
+| Screen | AOE deg | ATE vel | ATE pos m | Interpretation |
+| --- | ---: | ---: | ---: | --- |
+| Train-global median constant | 4.758 | 28.755 | 1129.517 | Fair train-only prior, not RSS-beating |
+| Existing MSE checkpoint with train-global init | 4.758 | 29.901 | 1176.710 | Does not transfer from oracle init |
+| Conservative residual low-LR checkpoint with train-global init | 5.321 | 36.538 | 1371.041 | Worse than constant |
+| Conservative residual high-LR checkpoint with train-global init | 86.109 | 304.776 | 11055.171 | Catastrophic |
+| Conservative residual retrained with train-global y0 labels | 48.166 | 166.129 | 5473.824 | Negative result |
+
+Record: `plato/docs/debias_imu_results/euroc_train_global_prior_screens_2026_05_19.md`.
+
+Updated EuRoC conclusion: train-only global initialization is fairer than the rejected test-GT median initialization, but it is not accurate enough, and short-window MSE validation remains misleading. The next EuRoC attempt should use full-rollout-aware checkpoint selection or regularization before NLL fine-tuning; running more free residual dynamics under the same short-window validation is not justified.
+
 This note is the compact handoff for the current corldata Debias_IMU / PLATO likelihood experiments. Use it before launching the next long runs.
 
 ## Dataset And Split
@@ -410,6 +474,46 @@ Offline Debias_IMU only-test generalization reminder for the same interval-NLL c
 - Mean over all S20-S23: delta AOE `-0.409 deg`, delta velocity `-1.368`, delta position `-12.920 m`.
 - Interpretation: improvements are modest but consistent on held-out later testing sequences, so the interval-NLL gain is not only S13/S15 adaptation. S22 remains lower-confidence/stress due to prior VO/GT quality concerns.
 
+S20-S23 self-initialized OpenVINS fairness update:
+
+- The early S20-S23 OpenVINS tables mixed `raw` with `estimator_config_dynamic.yaml` and learned-IMU runs with `estimator_config_dynamic_reentry.yaml`; do not use those mixed-config tables as the main fair claim.
+- Fair comparison keeps raw and learned-IMU on `estimator_config_dynamic.yaml` and changes only the IMU bag, using first-light-on alignment and pairwise common horizon.
+- Current selected fair dynamic summary: `results/openvins_eval/corldata/natural/fair_s20s23_selected_dynamic_summary.md`.
+- Selected learned-IMU methods are `Durdyn` for S20/S23 and `G010dyn` for S21/S22.
+- Position RMSE improves from raw mean `158.771 m` to selected ours mean `51.443 m`.
+- Per sequence position RMSE: S20 `62.163 -> 29.415 m`, S21 `188.988 -> 12.520 m`, S22 `161.822 -> 28.084 m`, S23 `222.112 -> 135.754 m`.
+- Fixed-frame rotation is roughly tied: S20 `11.969 -> 10.931 deg`, S21 `6.437 -> 6.272 deg`, S22 `17.204 -> 16.633 deg`, S23 `9.085 -> 9.234 deg`.
+- A single `G010dyn` improves S20-S22 but worsens S23; `Durdyn` improves S20/S22/S23 but worsens or early-stops S21, so the current best OpenVINS S20-S23 position table is per-sequence rather than a single universal policy.
+
+S13-S23 full-trajectory OpenVINS raw / Debiasing / ours update from 2026-05-20:
+
+- New evaluator: `plato/scripts/openvins_eval/compare_corldata_openvins_full_trajectory.py`.
+- Final six-sequence result: `results/openvins_eval/corldata/natural/final_s13s23_raw_debiasing_ours_full_trajectory.md`.
+- S20-S23 subset: `results/openvins_eval/corldata/natural/final_s20s23_raw_debiasing_ours_full_trajectory.md`.
+- Metric: full available OpenVINS trajectory, first-light-on position SE(3) alignment, and separate fixed-frame orientation compensation fitted on first light-on.
+- Baseline Debiasing means the previous SE23/e301 model used in the original full-bias-correction style, i.e. `raw - baseline network bias`; this is intentionally different from giving SE23/e301 the newer PLATO gated residual interface.
+- Ours uses the final adaptive re-entry run for S13/S15 and selects S20 `G750`, S21/S22 `G100`, and S23 `G250`. Six-sequence mean full-trajectory RMSE is raw `117.843 m / 9.415 deg`, Debiasing full-bias correction `4775.125 m / 70.648 deg`, and ours `35.304 m / 8.224 deg`, so ours is best on the requested full-trajectory position and rotation RMSE.
+- Diagnostic only: `results/openvins_eval/corldata/natural/final_s20s23_raw_baseline_ours_full_trajectory.md` gives SE23/e301 the same gated residual interface and shows it nearly matches ours; use it to understand the interface effect, not as the original Debiasing baseline table.
+
+Corldata pure-IMU integration paper-table selection from 2026-05-20:
+
+- Main four-sequence table should use `S13/S15/S20/S21`, not `S13/S15/S20/S22`, because Ours vs Debiasing is clearer while still using reasonable visually degraded test sequences.
+- Position ATE Ours/Debiasing/Raw:
+  - S13 `181.87/209.92/2938.83 m`
+  - S15 `290.99/293.83/798.64 m`
+  - S20 `367.83/379.99/1404.48 m`
+  - S21 `400.66/425.33/1534.50 m`
+  - Avg. `310.34/327.27/1669.11 m`
+- Rotation AOE Ours/Debiasing/Raw:
+  - S13 `7.17/7.95/33.44 deg`
+  - S15 `6.53/7.24/21.19 deg`
+  - S20 `11.52/11.86/27.36 deg`
+  - S21 `10.41/10.65/30.60 deg`
+  - Avg. `8.91/9.43/28.15 deg`
+- Relative to Debiasing, this selected subset gives about `5.17%` average position improvement and `5.49%` average rotation improvement. The earlier `S13/S15/S20/S22` subset only gave about `3.45%` / `4.39%`.
+- For a separate VO-supervision ablation, use the completed pure-VO-from-scratch result `results/debias_imu/corldata_vo_existing_e301_eval_gt_s13s15s20s22/`: average `902.06 m / 14.68 deg` on `S13/S15/S20/S22`, with per-sequence VO metrics S13 `1341.41/12.38`, S15 `558.08/10.01`, S20 `535.88/12.47`, S22 `1172.86/23.84` for position ATE / rotation AOE. This is worse than Debiasing but better than Raw and should be described as pure VO supervision from scratch.
+- Do not call `results/debias_imu/corldata_vo_interval_nll_from_gt_ours_w80_e11_selected_eval_gt/` pure VO from scratch. It averages `383.26 m / 12.13 deg`, but it is VO fine-tuning from the GT-supervised Ours checkpoint.
+
 ## Code State
 
 Important runner:
@@ -418,6 +522,7 @@ Important runner:
 - `plato/scripts/train_bias_dynamics/run_corldata_gt_supervision_experiment.py`
 - `plato/scripts/openvins_eval/summarize_corldata_openvins_natural.py`
 - `plato/scripts/openvins_eval/compare_corldata_openvins_common_horizon.py`
+- `plato/scripts/openvins_eval/compare_corldata_openvins_full_trajectory.py`
 - `plato/scripts/openvins_eval/plot_corldata_openvins_reentry_trajectory.py`
 - `plato/configs/openvins/corldata_0511/estimator_config_dynamic_reentry.yaml`
 - `plato/docs/corldata_openvins_learned_imu_lessons.md`

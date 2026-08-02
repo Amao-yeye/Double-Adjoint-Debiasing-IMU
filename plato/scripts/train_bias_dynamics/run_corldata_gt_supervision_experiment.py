@@ -30,6 +30,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--outputdir", type=Path, default=None)
     parser.add_argument("--cache-dir", type=Path, default=None)
     parser.add_argument("--train-seqs", nargs="+", default=None)
+    parser.add_argument("--val-seqs", nargs="+", default=None)
     parser.add_argument("--test-seqs", nargs="+", default=None)
     parser.add_argument("--recompute-cache", action="store_true")
     parser.add_argument("--test-recompute", action="store_true")
@@ -90,6 +91,7 @@ def main() -> None:
 
     resolved = dict(cfg)
     train_seqs = args.train_seqs if args.train_seqs is not None else as_list(cfg.get("train_seqs"))
+    val_seqs = args.val_seqs if args.val_seqs is not None else as_list(cfg.get("val_seqs", train_seqs))
     test_seqs = args.test_seqs if args.test_seqs is not None else as_list(cfg.get("test_seqs"))
     resolved.update(
         {
@@ -99,6 +101,7 @@ def main() -> None:
             "network_type_Gyro": network_type_gyro,
             "network_type_Acc": network_type_acc,
             "train_seqs": train_seqs,
+            "val_seqs": val_seqs,
             "test_seqs": test_seqs,
             "epoch": int(args.epoch if args.epoch is not None else cfg.get("epoch", 1)),
             "device": args.device or cfg.get("device", "cpu"),
@@ -110,7 +113,7 @@ def main() -> None:
         json.dumps(
             {
                 "train": train_seqs,
-                "val": "per training sequence, last percent_for_val split in Debias_IMU runner",
+                "val": val_seqs,
                 "test": test_seqs,
             },
             indent=2,
@@ -128,8 +131,11 @@ def main() -> None:
     add_option(argv, "--pseudo-gt-root", cfg.get("pseudo_gt_root"))
     add_option(argv, "--vo-supervision-world-frame", cfg.get("vo_supervision_world_frame"))
     add_option(argv, "--vo-gap-tolerance-s", cfg.get("vo_gap_tolerance_s"))
+    add_option(argv, "--source-position-sg-window", cfg.get("source_position_sg_window"))
+    add_option(argv, "--source-position-sg-order", cfg.get("source_position_sg_order"))
     add_list_option(argv, "--gravity-accel-world", cfg.get("gravity_accel_world"))
     add_list_option(argv, "--train-seqs", train_seqs)
+    add_list_option(argv, "--val-seqs", val_seqs)
     add_list_option(argv, "--test-seqs", test_seqs)
     add_option(argv, "--network_type_Gyro", network_type_gyro)
     add_option(argv, "--network_type_Acc", network_type_acc)
@@ -180,12 +186,17 @@ def main() -> None:
     add_option(argv, "--interval-lr-sigma", cfg.get("interval_lr_sigma"))
     add_option(argv, "--interval-covariance-gradient-mode", cfg.get("interval_covariance_gradient_mode"))
     add_option(argv, "--interval-noise-init-model-path", cfg.get("interval_noise_init_model_path"))
+    add_option(argv, "--trajectory-supervision-mode", cfg.get("trajectory_supervision_mode"))
+    add_option(argv, "--trajectory-supervision-stride", cfg.get("trajectory_supervision_stride"))
+    add_option(argv, "--trajectory-max-supervised-states", cfg.get("trajectory_max_supervised_states"))
     add_option(argv, "--sg_window_bw", cfg.get("sg_window_bw"))
     add_option(argv, "--sg_order_bw", cfg.get("sg_order_bw"))
     add_option(argv, "--sg_window_ba", cfg.get("sg_window_ba"))
     add_option(argv, "--sg_order_ba", cfg.get("sg_order_ba"))
     add_option(argv, "--initial-bias-mode", cfg.get("initial_bias_mode"))
     add_option(argv, "--initial-bias-window-s", cfg.get("initial_bias_window_s"))
+    add_option(argv, "--train-initial-bw-mode", cfg.get("train_initial_bw_mode"))
+    add_option(argv, "--train-initial-ba-mode", cfg.get("train_initial_ba_mode"))
     add_option(argv, "--bw_model_path", cfg.get("bw_model_path"))
     add_option(argv, "--ba_model_path", cfg.get("ba_model_path"))
     add_option(argv, "--ba-init-model-path", cfg.get("ba_init_model_path"))
@@ -208,6 +219,7 @@ def main() -> None:
     add_bool_flag(argv, "--skip-gyro-train", bool(cfg.get("skip_gyro_train", False)))
     add_bool_flag(argv, "--stop-after-gyro", bool(cfg.get("stop_after_gyro", False)))
     add_bool_flag(argv, "--skip-test", bool(cfg.get("skip_test", False)))
+    add_bool_flag(argv, "--only-test", bool(cfg.get("only_test", False)))
     add_bool_flag(argv, "--recompute-cache", bool(cfg.get("recompute_cache", False) or args.recompute_cache))
     add_bool_flag(argv, "--test-recompute", bool(cfg.get("test_recompute", False) or args.test_recompute))
     if "readable_val_metrics" in cfg:

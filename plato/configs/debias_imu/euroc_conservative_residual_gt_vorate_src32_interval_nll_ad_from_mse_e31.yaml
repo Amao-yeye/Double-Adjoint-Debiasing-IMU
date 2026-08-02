@@ -1,0 +1,71 @@
+dataset: euroc
+train_supervision: gt
+trainval_gt_root: results/debias_imu/Euroc_GT_at_VO_timestamps_dedup
+trainval_gt_source: state_groundtruth_estimate0
+supervision_timing: source
+exclude_train_seq:
+  - V2_03_difficult
+
+cache_dir: results/debias_imu/cache/EUROC_conservative_residual_gt_vorate_src32_mse_first
+test_cache_dir: results/debias_imu/cache/EUROC_test_gt
+outputdir: results/debias_imu/EUROC_conservative_residual_gt_vorate_src32_interval_nll_ad_from_mse_e31
+
+# NLL refinement for the same conservative residual architecture. This is
+# intentionally Acc-only at first so NLL cannot easily destroy the learned gyro
+# mean that controls long-horizon EuRoC rotation.
+network_type_Gyro: bw_func_conservative_residual
+network_type_Acc: ba_func_conservative_residual
+bw_model_path: results/debias_imu/EUROC_conservative_residual_gt_vorate_src32_mse_first_e101/Gyro_weights/best_val_model.pt
+ba_init_model_path: results/debias_imu/EUROC_conservative_residual_gt_vorate_src32_mse_first_e101/Acc_weights/best_val_model.pt
+skip_gyro_train: true
+gyro_loss: ad
+acc_loss: se23
+acc_loss_type: interval_nll
+
+loss_window: 32
+batch_size: 128
+epoch: 31
+lr_Gyro: 0.0001
+lr_Acc: 0.00001
+weight_decay_Gyro: 0.000001
+weight_decay_Acc: 0.000001
+gyro_lr_step_size: 50
+acc_lr_step_size: 15
+gyro_lr_gamma: 0.5
+acc_lr_gamma: 0.5
+val_freq: 5
+save_freq: 10
+train_batch_strategy: random_sequence
+percent_for_val: 0.2
+
+interval_nll_mode: nll_joint
+interval_sigma_a_nominal: 0.0028
+interval_sigma_g_nominal: 0.000245
+interval_sigma_a_floor2: 0.0000000001
+interval_sigma_g_floor2: 0.000000000001
+interval_target_cov_floor: 0.000000001
+interval_jitter: 0.00000001
+interval_lr_sigma: 0.001
+interval_prior_lambda_a: 0.001
+interval_prior_lambda_g: 0.001
+interval_detach_covariance_theta: true
+interval_covariance_gradient_mode: ad
+interval_debug_covariance_gradients: false
+nll_train_gyro: false
+
+acc_loss_rot_weight: 1.0
+acc_loss_vel_weight: 1.0
+acc_loss_pos_weight: 1.0
+
+sg_window_bw: 101
+sg_order_bw: 3
+sg_window_ba: 31
+sg_order_ba: 3
+
+initial_bias_mode: first
+initial_bias_window_s: 5.0
+
+device: cuda
+test_device: cpu
+use_best_val: true
+readable_val_metrics: true

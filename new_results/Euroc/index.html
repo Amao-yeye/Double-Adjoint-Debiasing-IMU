@@ -1,0 +1,91 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Euroc Rollout Samples</title>
+  <style>
+    body { font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; margin: 24px; color: #111827; background: #f9fafb; }
+    h1 { font-size: 24px; margin: 0 0 12px; }
+    p { color: #4b5563; }
+    table { border-collapse: collapse; width: 100%; max-width: 920px; background: #fff; font-size: 14px; }
+    th, td { border: 1px solid #e5e7eb; padding: 8px 10px; text-align: right; }
+    th:first-child, td:first-child, th:last-child, td:last-child { text-align: left; }
+    th { background: #f3f4f6; }
+    a { color: #2563eb; }
+    code { background: #eef2ff; padding: 1px 4px; border-radius: 4px; }
+  </style>
+</head>
+<body>
+  <h1>Euroc Rollout Samples</h1>
+  <p>Ours best source: <code>results/debias_imu/EUROC_conservative_residual_train_global_y0_fullrollout_v201_w256_mse_e31</code></p>
+  <p>Formal non-overlapping window evaluation: <a href="formal_windows/summary.md">Markdown</a>, <a href="formal_windows/summary.csv">CSV</a>, <a href="formal_windows/per_sequence_summary.csv">per-sequence CSV</a>, <a href="formal_windows/per_window_summary.csv">per-window CSV</a>.</p>
+  <table>
+    <thead>
+      <tr>
+        <th>L steps</th>
+        <th>method</th>
+        <th>windows</th>
+        <th>propagated states</th>
+        <th>mean rot rad</th>
+        <th>mean rot deg</th>
+        <th>mean vel m/s</th>
+        <th>mean pos m</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr><td>50</td><td>raw</td><td>2447</td><td>122350</td><td>0.010256</td><td>0.5877</td><td>0.0398</td><td>0.0033</td></tr>
+      <tr><td>50</td><td>ours</td><td>2447</td><td>122350</td><td>0.000781</td><td>0.0447</td><td>0.0225</td><td>0.0022</td></tr>
+      <tr><td>100</td><td>raw</td><td>1222</td><td>122200</td><td>0.020283</td><td>1.1621</td><td>0.0902</td><td>0.0141</td></tr>
+      <tr><td>100</td><td>ours</td><td>1222</td><td>122200</td><td>0.001308</td><td>0.0750</td><td>0.0419</td><td>0.0075</td></tr>
+      <tr><td>150</td><td>raw</td><td>813</td><td>121950</td><td>0.030283</td><td>1.7351</td><td>0.1549</td><td>0.0350</td></tr>
+      <tr><td>150</td><td>ours</td><td>813</td><td>121950</td><td>0.001766</td><td>0.1012</td><td>0.0610</td><td>0.0160</td></tr>
+      <tr><td>200</td><td>raw</td><td>609</td><td>121800</td><td>0.040253</td><td>2.3063</td><td>0.2338</td><td>0.0685</td></tr>
+      <tr><td>200</td><td>ours</td><td>609</td><td>121800</td><td>0.002220</td><td>0.1272</td><td>0.0798</td><td>0.0276</td></tr>
+    </tbody>
+  </table>
+  <p>Formal V102/V103/V202 subset: <a href="formal_windows_v102_v103_v202/summary.md">Markdown</a>, <a href="formal_windows_v102_v103_v202/summary.csv">CSV</a>, <a href="formal_windows_v102_v103_v202/per_sequence_summary.csv">per-sequence CSV</a>, <a href="formal_windows_v102_v103_v202/per_window_summary.csv">per-window CSV</a>.</p>
+  <table>
+    <thead>
+      <tr>
+        <th>L steps</th>
+        <th>method</th>
+        <th>windows</th>
+        <th>propagated states</th>
+        <th>mean rot rad</th>
+        <th>mean rot deg</th>
+        <th>mean vel m/s</th>
+        <th>mean pos m</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr><td>50</td><td>raw</td><td>1213</td><td>60650</td><td>0.010339</td><td>0.5924</td><td>0.0270</td><td>0.0023</td></tr>
+      <tr><td>50</td><td>ours</td><td>1213</td><td>60650</td><td>0.001071</td><td>0.0614</td><td>0.0150</td><td>0.0015</td></tr>
+      <tr><td>100</td><td>raw</td><td>606</td><td>60600</td><td>0.020385</td><td>1.1680</td><td>0.0631</td><td>0.0097</td></tr>
+      <tr><td>100</td><td>ours</td><td>606</td><td>60600</td><td>0.001659</td><td>0.0951</td><td>0.0265</td><td>0.0048</td></tr>
+      <tr><td>150</td><td>raw</td><td>403</td><td>60450</td><td>0.030395</td><td>1.7415</td><td>0.1129</td><td>0.0246</td></tr>
+      <tr><td>150</td><td>ours</td><td>403</td><td>60450</td><td>0.002137</td><td>0.1224</td><td>0.0380</td><td>0.0100</td></tr>
+      <tr><td>200</td><td>raw</td><td>302</td><td>60400</td><td>0.040348</td><td>2.3118</td><td>0.1768</td><td>0.0496</td></tr>
+      <tr><td>200</td><td>ours</td><td>302</td><td>60400</td><td>0.002616</td><td>0.1499</td><td>0.0495</td><td>0.0172</td></tr>
+    </tbody>
+  </table>
+  <p>Each rollout length uses 3 high-motion samples per sequence over five EuRoC test sequences. Plots show ground truth, raw IMU, and ours.</p>
+  <p>Endpoint rotation/velocity/position error summary: <a href="rollout_error_summary.md">Markdown</a>, <a href="rollout_error_summary.csv">CSV</a>.</p>
+  <table>
+    <thead>
+      <tr>
+        <th>rollout</th>
+        <th>states</th>
+        <th>mean raw end err m</th>
+        <th>mean ours end err m</th>
+        <th>report</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr><td>50 steps</td><td>51</td><td>0.020</td><td>0.017</td><td><a href="rollout50steps/html/index.html">open</a></td></tr>
+      <tr><td>100 steps</td><td>101</td><td>0.053</td><td>0.033</td><td><a href="rollout100steps/html/index.html">open</a></td></tr>
+      <tr><td>150 steps</td><td>151</td><td>0.112</td><td>0.056</td><td><a href="rollout150steps/html/index.html">open</a></td></tr>
+      <tr><td>200 steps</td><td>201</td><td>0.222</td><td>0.086</td><td><a href="rollout200steps/html/index.html">open</a></td></tr>
+    </tbody>
+  </table>
+</body>
+</html>

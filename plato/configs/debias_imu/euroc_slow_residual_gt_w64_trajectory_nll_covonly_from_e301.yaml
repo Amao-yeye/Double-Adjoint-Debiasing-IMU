@@ -1,0 +1,83 @@
+dataset: euroc
+train_supervision: gt
+supervision_timing: imu
+
+model:
+  type: bias_dynamics_node
+  use_udot: false
+loss:
+  type: trajectory_state_nll
+  covariance_scaling: 1.0
+  use_logdet: true
+supervision_config:
+  mode: sparse
+  stride: 4
+  max_supervised_states: 16
+  align_to_imu_frame: true
+
+cache_dir: results/debias_imu/cache/EUROC_slow_residual_gt_w64_sg
+test_cache_dir: results/debias_imu/cache/EUROC_test_gt
+outputdir: results/debias_imu/EUROC_slow_residual_gt_w64_trajectory_nll_covonly_from_e301
+
+# Unified no-u_dot architecture counterpart to the corldata slow_residual run.
+# Stage 2 freezes the SE23 mean and learns scalar IMU noise with the full
+# trajectory-state NLL. This config is intentionally conservative.
+network_type_Gyro: bw_func_slow_residual
+network_type_Acc: ba_func_slow_residual
+bw_model_path: results/debias_imu/EUROC_slow_residual_gt_w64_sg_ad_e301_b1000/Gyro_weights/best_val_model.pt
+ba_init_model_path: results/debias_imu/EUROC_slow_residual_gt_w64_sg_ad_e301_b1000/Acc_weights/best_val_model.pt
+skip_gyro_train: true
+
+exclude_train_seq: [V2_03_difficult]
+loss_window: 64
+# EuRoC IMU is 200 Hz here: (64 - 1) * 0.005 ~= 0.315 s.
+batch_size: 16
+epoch: 21
+lr_Gyro: 0.005
+lr_Acc: 0.001
+weight_decay_Gyro: 0.000001
+weight_decay_Acc: 0.000001
+gyro_lr_step_size: 150
+acc_lr_step_size: 75
+gyro_lr_gamma: 0.5
+acc_lr_gamma: 0.5
+val_freq: 5
+save_freq: 10
+train_batch_strategy: random_sequence
+percent_for_val: 0.2
+
+acc_loss_type: trajectory_nll
+interval_nll_mode: nll_cov_only
+interval_sigma_a_nominal: 0.0030
+interval_sigma_g_nominal: 0.00026
+interval_sigma_a_floor2: 0.0000000001
+interval_sigma_g_floor2: 0.000000000001
+interval_target_cov_floor: 0.000000001
+interval_jitter: 0.00000001
+interval_lr_sigma: 0.005
+interval_prior_lambda_a: 0.001
+interval_prior_lambda_g: 0.001
+interval_detach_covariance_theta: true
+interval_covariance_gradient_mode: analytic_sensitivity
+trajectory_supervision_mode: sparse
+trajectory_supervision_stride: 4
+trajectory_max_supervised_states: 16
+
+acc_loss_rot_weight: 1.0
+acc_loss_vel_weight: 1.0
+acc_loss_pos_weight: 1.0
+
+use_best_val: true
+readable_val_metrics: true
+
+sg_window_bw: 15
+sg_order_bw: 3
+sg_window_ba: 15
+sg_order_ba: 3
+dt: 0.005
+
+initial_bias_mode: first
+initial_bias_window_s: 1.0
+
+device: cuda
+test_device: cpu
